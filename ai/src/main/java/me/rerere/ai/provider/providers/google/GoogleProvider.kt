@@ -46,6 +46,7 @@ import me.rerere.ai.provider.providers.google.vertex.ServiceAccountTokenProvider
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.registry.ModelRegistry
+import me.rerere.ai.ui.GoogleFileDataMetadata
 import me.rerere.ai.ui.GoogleThoughtMetadata
 import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
@@ -88,7 +89,12 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     private val serviceAccountTokenProvider by lazy {
         ServiceAccountTokenProvider(client)
     }
-    private val interactionsAPI = InteractionsAPI(client = client, keyRoulette = keyRoulette)
+    private val fileManager = GoogleFileManager(client = client, keyRoulette = keyRoulette)
+    private val interactionsAPI = InteractionsAPI(
+        client = client,
+        keyRoulette = keyRoulette,
+        fileManager = fileManager,
+    )
 
     override suspend fun getQuota(providerSetting: ProviderSetting.Google): ProviderQuota? =
         client.runQuotaQuery(providerSetting) {
@@ -183,7 +189,12 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             return@withContext interactionsAPI.generateText(providerSetting, messages, params)
         }
 
-        val requestBody = buildCompletionRequestBody(messages, params)
+        val resolvedMessages = fileManager.resolveFileParts(
+            providerSetting = providerSetting,
+            customHeaders = params.customHeaders,
+            messages = messages,
+        )
+        val requestBody = buildCompletionRequestBody(resolvedMessages, params)
 
         val url = buildUrl(
             providerSetting = providerSetting,
@@ -241,7 +252,12 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): Flow<StreamChunk> = callbackFlow {
-        val requestBody = buildCompletionRequestBody(messages, params)
+        val resolvedMessages = fileManager.resolveFileParts(
+            providerSetting = providerSetting,
+            customHeaders = params.customHeaders,
+            messages = messages,
+        )
+        val requestBody = buildCompletionRequestBody(resolvedMessages, params)
 
         val url = buildUrl(
             providerSetting = providerSetting,
@@ -780,24 +796,58 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
 
         is UIMessagePart.Video -> {
-            encodeBase64(false).getOrNull()?.let { base64Data ->
+            val fileMeta = metadataAs<GoogleFileDataMetadata>()
+            if (fileMeta?.fileUri != null) {
                 buildJsonObject {
-                    put("inlineData", buildJsonObject {
-                        put("mimeType", "video/mp4")
-                        put("data", base64Data)
+                    put("fileData", buildJsonObject {
+                        put("mimeType", fileMeta.mimeType ?: "video/mp4")
+                        put("fileUri", fileMeta.fileUri)
                     })
+                }
+            } else {
+                encodeBase64(false).getOrNull()?.let { base64Data ->
+                    buildJsonObject {
+                        put("inlineData", buildJsonObject {
+                            put("mimeType", "video/mp4")
+                            put("data", base64Data)
+                        })
+                    }
                 }
             }
         }
 
         is UIMessagePart.Audio -> {
-            encodeBase64(false).getOrNull()?.let { base64Data ->
+            val fileMeta = metadataAs<GoogleFileDataMetadata>()
+            if (fileMeta?.fileUri != null) {
                 buildJsonObject {
-                    put("inlineData", buildJsonObject {
-                        put("mimeType", "audio/mp3")
-                        put("data", base64Data)
+                    put("fileData", buildJsonObject {
+                        put("mimeType", fileMeta.mimeType ?: "audio/mp3")
+                        put("fileUri", fileMeta.fileUri)
                     })
                 }
+            } else {
+                encodeBase64(false).getOrNull()?.let { base64Data ->
+                    buildJsonObject {
+                        put("inlineData", buildJsonObject {
+                            put("mimeType", "audio/mp3")
+                            put("data", base64Data)
+                        })
+                    }
+                }
+            }
+        }
+
+        is UIMessagePart.Document -> {
+            val fileMeta = metadataAs<GoogleFileDataMetadata>()
+            if (fileMeta?.fileUri != null) {
+                buildJsonObject {
+                    put("fileData", buildJsonObject {
+                        put("mimeType", fileMeta.mimeType ?: mime.ifBlank { "application/pdf" })
+                        put("fileUri", fileMeta.fileUri)
+                    })
+                }
+            } else {
+                null
             }
         }
 

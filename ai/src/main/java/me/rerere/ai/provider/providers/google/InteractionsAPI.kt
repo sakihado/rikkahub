@@ -35,6 +35,7 @@ import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.registry.ModelRegistry
+import me.rerere.ai.ui.GoogleFileDataMetadata
 import me.rerere.ai.ui.GoogleInteractionsMetadata
 import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
@@ -80,13 +81,19 @@ private const val TAG = "InteractionsAPI"
 internal class InteractionsAPI(
     private val client: OkHttpClient,
     private val keyRoulette: KeyRoulette = KeyRoulette.default(),
+    private val fileManager: GoogleFileManager = GoogleFileManager(client, keyRoulette),
 ) {
     suspend fun generateText(
         providerSetting: ProviderSetting.Google,
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): TextGenerationResult = withContext(Dispatchers.IO) {
-        val requestBody = buildRequestBody(messages, params, stream = false)
+        val resolvedMessages = fileManager.resolveFileParts(
+            providerSetting = providerSetting,
+            customHeaders = params.customHeaders,
+            messages = messages,
+        )
+        val requestBody = buildRequestBody(resolvedMessages, params, stream = false)
         val request = buildRequest(providerSetting, params, requestBody)
 
         // await() waits for the response headers; reading the body can still block.
@@ -104,7 +111,12 @@ internal class InteractionsAPI(
         messages: List<UIMessage>,
         params: TextGenerationParams,
     ): Flow<StreamChunk> = callbackFlow {
-        val requestBody = buildRequestBody(messages, params, stream = true)
+        val resolvedMessages = fileManager.resolveFileParts(
+            providerSetting = providerSetting,
+            customHeaders = params.customHeaders,
+            messages = messages,
+        )
+        val requestBody = buildRequestBody(resolvedMessages, params, stream = true)
         val request = buildRequest(providerSetting, params, requestBody)
 
         Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
@@ -403,19 +415,54 @@ internal class InteractionsAPI(
             }
         }
 
-        is UIMessagePart.Video -> encodeBase64(false).getOrNull()?.let { base64Data ->
-            buildJsonObject {
-                put("type", "video")
-                put("mime_type", "video/mp4")
-                put("data", base64Data)
+        is UIMessagePart.Video -> {
+            val fileMeta = metadataAs<GoogleFileDataMetadata>()
+            if (fileMeta?.fileUri != null) {
+                buildJsonObject {
+                    put("type", "video")
+                    put("mime_type", fileMeta.mimeType ?: "video/mp4")
+                    put("uri", fileMeta.fileUri)
+                }
+            } else {
+                encodeBase64(false).getOrNull()?.let { base64Data ->
+                    buildJsonObject {
+                        put("type", "video")
+                        put("mime_type", "video/mp4")
+                        put("data", base64Data)
+                    }
+                }
             }
         }
 
-        is UIMessagePart.Audio -> encodeBase64(false).getOrNull()?.let { base64Data ->
-            buildJsonObject {
-                put("type", "audio")
-                put("mime_type", "audio/mp3")
-                put("data", base64Data)
+        is UIMessagePart.Audio -> {
+            val fileMeta = metadataAs<GoogleFileDataMetadata>()
+            if (fileMeta?.fileUri != null) {
+                buildJsonObject {
+                    put("type", "audio")
+                    put("mime_type", fileMeta.mimeType ?: "audio/mp3")
+                    put("uri", fileMeta.fileUri)
+                }
+            } else {
+                encodeBase64(false).getOrNull()?.let { base64Data ->
+                    buildJsonObject {
+                        put("type", "audio")
+                        put("mime_type", "audio/mp3")
+                        put("data", base64Data)
+                    }
+                }
+            }
+        }
+
+        is UIMessagePart.Document -> {
+            val fileMeta = metadataAs<GoogleFileDataMetadata>()
+            if (fileMeta?.fileUri != null) {
+                buildJsonObject {
+                    put("type", "document")
+                    put("mime_type", fileMeta.mimeType ?: mime.ifBlank { "application/pdf" })
+                    put("uri", fileMeta.fileUri)
+                }
+            } else {
+                null
             }
         }
 

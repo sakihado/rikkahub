@@ -108,6 +108,15 @@ data class GoogleInteractionsMetadata(
 ) : PartMetadata
 
 /**
+ * Google Gemini Files API 已上传文件的引用元数据，缓存在内存或消息部件上以转换为 fileData / uri
+ */
+@Serializable
+data class GoogleFileDataMetadata(
+    val fileUri: String? = null,
+    val mimeType: String? = null,
+) : PartMetadata
+
+/**
  * 文件编辑类工具(如 workspace_edit_file)输出部件的元数据,
  * 携带 unified diff 文本供 UI 渲染 diff view, 不会发送给 API
  */

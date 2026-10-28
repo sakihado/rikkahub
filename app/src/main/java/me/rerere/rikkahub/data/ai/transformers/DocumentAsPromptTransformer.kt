@@ -4,12 +4,14 @@ import androidx.core.net.toFile
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.document.DocxParser
 import me.rerere.document.EpubParser
 import me.rerere.document.PdfParser
 import me.rerere.document.PptxParser
+import me.rerere.rikkahub.data.datastore.findProvider
 import java.io.File
 
 object DocumentAsPromptTransformer : InputMessageTransformer {
@@ -17,6 +19,9 @@ object DocumentAsPromptTransformer : InputMessageTransformer {
         ctx: TransformerContext,
         messages: List<UIMessage>,
     ): List<UIMessage> {
+        val provider = ctx.model.findProvider(ctx.settings.providers)
+        val useGeminiNativeFileApi = provider is ProviderSetting.Google && !provider.vertexAI
+
         return withContext(Dispatchers.IO) {
             messages.map { message ->
                 message.copy(
@@ -24,6 +29,22 @@ object DocumentAsPromptTransformer : InputMessageTransformer {
                         val documents = filterIsInstance<UIMessagePart.Document>()
                         if (documents.isNotEmpty()) {
                             documents.forEach { document ->
+                                // 对于支持 Gemini File API 的原生文档（如 PDF），跳过本地纯文本提取，保留图片与排版交由 GoogleProvider 上传为 fileData
+                                val isPdf = document.mime.equals("application/pdf", ignoreCase = true) ||
+                                    document.fileName.endsWith(".pdf", ignoreCase = true)
+                                if (useGeminiNativeFileApi && isPdf) {
+                                    val path = resolveWorkspacePath(document)
+                                    if (path != null) {
+                                        add(
+                                            0,
+                                            UIMessagePart.Text(
+                                                "<UploadFile name=\"${document.fileName}\" path=\"$path\" note=\"Attached natively via Gemini File API\" />"
+                                            )
+                                        )
+                                    }
+                                    return@forEach
+                                }
+
                                 val content = readDocumentContent(document)
                                 val path = resolveWorkspacePath(document)
                                 val pathAttr = path?.let { " path=\"$it\"" } ?: ""
