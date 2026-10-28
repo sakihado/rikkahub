@@ -962,6 +962,11 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_provider_page_text">文本</string>
   <string name="setting_provider_page_title">提供商</string>
   <string name="setting_provider_page_tool">工具</string>
+  <string name="setting_provider_page_file_upload">文件上传</string>
+  <string name="setting_provider_page_file_upload_native">原生文件上传（File API）</string>
+  <string name="setting_provider_page_file_upload_native_desc">把 PDF/视频/音频上传到 Gemini Files API，以 fileData 引用发送。保留图片与排版，支持大文件，同一对话只上传一次。</string>
+  <string name="setting_provider_page_file_upload_inline">使用 inline 上传（Base64）</string>
+  <string name="setting_provider_page_file_upload_inline_desc">把文件直接塞进请求体。适用于没有上传接口的第三方反代；单文件约 15MB 上限，且每轮都会重新发送。</string>
   <string name="setting_provider_page_use_service_account">使用服务账号</string>
   <string name="setting_provider_page_vertex_ai">Vertex AI</string>
   <string name="setting_tts_page_add">添加</string>

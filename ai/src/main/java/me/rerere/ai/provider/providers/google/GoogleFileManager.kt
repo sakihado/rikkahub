@@ -2,6 +2,7 @@ package me.rerere.ai.provider.providers.google
 
 import android.util.Log
 import androidx.core.net.toUri
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -41,6 +42,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "GoogleFileManager"
+
+// Gemini 要求单次请求体 ≤ 20MB，Base64 会膨胀约 33%，这里留出余量
+private const val MAX_INLINE_BYTES = 15L * 1024 * 1024
 
 /**
  * Gemini Files API (`POST /upload/v1beta/files`) 上传与生命周期管理。
@@ -111,6 +115,8 @@ internal class GoogleFileManager(
         messages: List<UIMessage>,
     ): List<UIMessage> {
         if (providerSetting.vertexAI) return messages
+        // 两个开关都关：保持旧行为，不做任何预处理
+        if (!providerSetting.useNativeFileUpload && !providerSetting.useInlineFileUpload) return messages
         return messages.map { message ->
             message.copy(
                 parts = message.parts.map { part ->
@@ -125,47 +131,29 @@ internal class GoogleFileManager(
         customHeaders: List<CustomHeader>,
         part: UIMessagePart,
     ): UIMessagePart {
-        if (part.metadataAs<GoogleFileDataMetadata>()?.fileUri != null) {
+        val existing = part.metadataAs<GoogleFileDataMetadata>()
+        if (existing?.fileUri != null || existing?.inlineData == true) {
             return part
         }
         return when (part) {
             is UIMessagePart.Video -> {
-                if (!part.url.startsWith("file://")) return part
-                val uploaded = getOrUploadFile(
-                    providerSetting = providerSetting,
-                    customHeaders = customHeaders,
-                    localUrl = part.url,
-                    mimeType = "video/mp4",
-                )
-                val fileMeta = GoogleFileDataMetadata(fileUri = uploaded.uri, mimeType = uploaded.mimeType).toMetadata()
-                part.copy(metadata = mergeMetadata(part.metadata, fileMeta))
+                val fileMeta = resolveFileMetadata(providerSetting, customHeaders, part.url, "video/mp4", null)
+                if (fileMeta == null) part else part.copy(metadata = mergeMetadata(part.metadata, fileMeta))
             }
 
             is UIMessagePart.Audio -> {
-                if (!part.url.startsWith("file://")) return part
-                val uploaded = getOrUploadFile(
-                    providerSetting = providerSetting,
-                    customHeaders = customHeaders,
-                    localUrl = part.url,
-                    mimeType = "audio/mp3",
-                )
-                val fileMeta = GoogleFileDataMetadata(fileUri = uploaded.uri, mimeType = uploaded.mimeType).toMetadata()
-                part.copy(metadata = mergeMetadata(part.metadata, fileMeta))
+                val fileMeta = resolveFileMetadata(providerSetting, customHeaders, part.url, "audio/mp3", null)
+                if (fileMeta == null) part else part.copy(metadata = mergeMetadata(part.metadata, fileMeta))
             }
 
             is UIMessagePart.Document -> {
                 val isPdf = part.mime.equals("application/pdf", ignoreCase = true) ||
                     part.fileName.endsWith(".pdf", ignoreCase = true)
-                if (!isPdf || !part.url.startsWith("file://")) return part
-                val uploaded = getOrUploadFile(
-                    providerSetting = providerSetting,
-                    customHeaders = customHeaders,
-                    localUrl = part.url,
-                    mimeType = "application/pdf",
-                    displayName = part.fileName,
+                if (!isPdf) return part
+                val fileMeta = resolveFileMetadata(
+                    providerSetting, customHeaders, part.url, "application/pdf", part.fileName
                 )
-                val fileMeta = GoogleFileDataMetadata(fileUri = uploaded.uri, mimeType = uploaded.mimeType).toMetadata()
-                part.copy(metadata = mergeMetadata(part.metadata, fileMeta))
+                if (fileMeta == null) part else part.copy(metadata = mergeMetadata(part.metadata, fileMeta))
             }
 
             is UIMessagePart.Tool -> {
@@ -179,6 +167,64 @@ internal class GoogleFileManager(
 
             else -> part
         }
+    }
+
+    /**
+     * 按提供商配置决定单个附件的传输方式，返回需要合并进 part.metadata 的内容。
+     *
+     * - 原生上传成功 → [GoogleFileDataMetadata.fileUri]（fileData 引用）
+     * - 走 inline → [GoogleFileDataMetadata.inlineData]（Base64 直接塞进请求）
+     * - 返回 null → 沿用旧逻辑（视频/音频 inline，文档丢弃）
+     */
+    private suspend fun resolveFileMetadata(
+        providerSetting: ProviderSetting.Google,
+        customHeaders: List<CustomHeader>,
+        url: String,
+        mimeType: String,
+        displayName: String?,
+    ): JsonObject? {
+        if (!url.startsWith("file://")) return null
+
+        if (providerSetting.useNativeFileUpload) {
+            try {
+                val uploaded = getOrUploadFile(
+                    providerSetting = providerSetting,
+                    customHeaders = customHeaders,
+                    localUrl = url,
+                    mimeType = mimeType,
+                    displayName = displayName,
+                )
+                return GoogleFileDataMetadata(
+                    fileUri = uploaded.uri,
+                    mimeType = uploaded.mimeType,
+                ).toMetadata()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 原生开关也需要 inline 兜底（第三方反代往往没有 /upload 接口）
+                if (!providerSetting.useInlineFileUpload) throw e
+                Log.w(TAG, "Native upload failed, falling back to inlineData: ${e.message}")
+            }
+        }
+
+        val resolvedMime = prepareInline(url, mimeType)
+        return GoogleFileDataMetadata(inlineData = true, mimeType = resolvedMime).toMetadata()
+    }
+
+    /** 校验 inline 体积上限（Gemini 要求整个请求 ≤ 20MB，Base64 还要膨胀 33%），并返回真实 MIME */
+    private fun prepareInline(url: String, mimeType: String): String {
+        val path = url.toUri().path ?: throw IllegalArgumentException("Invalid file URI: $url")
+        val file = File(path)
+        if (!file.exists() || !file.isFile) {
+            throw IllegalArgumentException("File does not exist: $url")
+        }
+        if (file.length() > MAX_INLINE_BYTES) {
+            throw IOException(
+                "文件过大 (${file.length() / 1024 / 1024}MB)，inline 上传上限约 " +
+                    "${MAX_INLINE_BYTES / 1024 / 1024}MB，请改用「原生文件上传」或压缩文件"
+            )
+        }
+        return guessMediaMimeType(file, mimeType)
     }
 
     suspend fun getOrUploadFile(

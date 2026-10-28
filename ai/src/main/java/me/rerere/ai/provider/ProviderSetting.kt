@@ -151,6 +151,10 @@ sealed class ProviderSetting {
         var location: String = "us-central1", // only for vertex AI service account
         var projectId: String = "", // only for vertex AI service account
         var useInteractionsApi: Boolean = false, // ignored when vertex AI is enabled
+        // 附件（PDF/视频/音频）通过 Gemini Files API 上传，以 fileData 引用发送
+        var useNativeFileUpload: Boolean = true,
+        // 附件以 Base64 inlineData 直接塞进请求（无法访问上传接口的第三方反代用这个）
+        var useInlineFileUpload: Boolean = false,
     ) : ApiKey() {
         override fun withQuotaQuery(query: QuotaQuery): ApiKey = copy(quotaQuery = query)
 

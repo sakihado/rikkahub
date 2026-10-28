@@ -796,62 +796,65 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
 
         is UIMessagePart.Video -> {
-            val fileMeta = metadataAs<GoogleFileDataMetadata>()
-            if (fileMeta?.fileUri != null) {
-                buildJsonObject {
-                    put("fileData", buildJsonObject {
-                        put("mimeType", fileMeta.mimeType ?: "video/mp4")
-                        put("fileUri", fileMeta.fileUri)
-                    })
-                }
-            } else {
-                encodeBase64(false).getOrNull()?.let { base64Data ->
-                    buildJsonObject {
-                        put("inlineData", buildJsonObject {
-                            put("mimeType", "video/mp4")
-                            put("data", base64Data)
-                        })
-                    }
-                }
-            }
+            val videoPart = this
+            googleMediaPart(
+                fileMeta = videoPart.metadataAs<GoogleFileDataMetadata>(),
+                defaultMime = "video/mp4",
+                legacyInline = true,
+            ) { videoPart.encodeBase64(false).getOrNull() }
         }
 
         is UIMessagePart.Audio -> {
-            val fileMeta = metadataAs<GoogleFileDataMetadata>()
-            if (fileMeta?.fileUri != null) {
-                buildJsonObject {
-                    put("fileData", buildJsonObject {
-                        put("mimeType", fileMeta.mimeType ?: "audio/mp3")
-                        put("fileUri", fileMeta.fileUri)
-                    })
-                }
-            } else {
-                encodeBase64(false).getOrNull()?.let { base64Data ->
-                    buildJsonObject {
-                        put("inlineData", buildJsonObject {
-                            put("mimeType", "audio/mp3")
-                            put("data", base64Data)
-                        })
-                    }
-                }
-            }
+            val audioPart = this
+            googleMediaPart(
+                fileMeta = audioPart.metadataAs<GoogleFileDataMetadata>(),
+                defaultMime = "audio/mp3",
+                legacyInline = true,
+            ) { audioPart.encodeBase64(false).getOrNull() }
         }
 
         is UIMessagePart.Document -> {
-            val fileMeta = metadataAs<GoogleFileDataMetadata>()
-            if (fileMeta?.fileUri != null) {
-                buildJsonObject {
-                    put("fileData", buildJsonObject {
-                        put("mimeType", fileMeta.mimeType ?: mime.ifBlank { "application/pdf" })
-                        put("fileUri", fileMeta.fileUri)
-                    })
-                }
-            } else {
-                null
-            }
+            val documentPart = this
+            googleMediaPart(
+                fileMeta = documentPart.metadataAs<GoogleFileDataMetadata>(),
+                defaultMime = documentPart.mime.ifBlank { "application/pdf" },
+                legacyInline = false,
+            ) { documentPart.encodeBase64(false).getOrNull() }
         }
 
         else -> null
+    }
+
+    /**
+     * 附件部件的三种发送方式：
+     * - metadata 有 fileUri → `fileData` 引用（Gemini Files API）
+     * - metadata 标记 inlineData → `inlineData`（Base64）
+     * - 都没有且 legacyInline → 旧行为，直接 Base64 塞进 `inlineData`
+     */
+    private fun googleMediaPart(
+        fileMeta: GoogleFileDataMetadata?,
+        defaultMime: String,
+        legacyInline: Boolean,
+        dataProvider: () -> String?,
+    ): JsonObject? {
+        val mime = fileMeta?.mimeType ?: defaultMime
+        fileMeta?.fileUri?.let { uri ->
+            return buildJsonObject {
+                put("fileData", buildJsonObject {
+                    put("mimeType", mime)
+                    put("fileUri", uri)
+                })
+            }
+        }
+        val inline = fileMeta?.inlineData == true || (fileMeta == null && legacyInline)
+        if (!inline) return null
+        val data = dataProvider() ?: return null
+        return buildJsonObject {
+            put("inlineData", buildJsonObject {
+                put("mimeType", mime)
+                put("data", data)
+            })
+        }
     }
 
     private fun UIMessagePart.Tool.toFunctionCallPart() = buildJsonObject {

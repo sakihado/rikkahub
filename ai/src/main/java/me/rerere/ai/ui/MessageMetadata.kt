@@ -114,6 +114,9 @@ data class GoogleInteractionsMetadata(
 data class GoogleFileDataMetadata(
     val fileUri: String? = null,
     val mimeType: String? = null,
+    // 该部件改为以 Base64 inlineData 发送，而不是 fileData 引用
+    @SerialName("inline_data")
+    val inlineData: Boolean? = null,
 ) : PartMetadata
 
 /**

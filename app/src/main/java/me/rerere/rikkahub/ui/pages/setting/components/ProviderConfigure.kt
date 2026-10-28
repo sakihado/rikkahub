@@ -627,6 +627,23 @@ private fun ProviderConfigureGoogle(
         }
     }
 
+    if (!provider.vertexAI) {
+        CardGroup(title = { Text(stringResource(R.string.setting_provider_page_file_upload)) }) {
+            switchItem(
+                checked = provider.useNativeFileUpload,
+                onCheckedChange = { onEdit(provider.copy(useNativeFileUpload = it)) },
+                supportingContent = { Text(stringResource(R.string.setting_provider_page_file_upload_native_desc)) },
+                headlineContent = { Text(stringResource(R.string.setting_provider_page_file_upload_native)) },
+            )
+            switchItem(
+                checked = provider.useInlineFileUpload,
+                onCheckedChange = { onEdit(provider.copy(useInlineFileUpload = it)) },
+                supportingContent = { Text(stringResource(R.string.setting_provider_page_file_upload_inline_desc)) },
+                headlineContent = { Text(stringResource(R.string.setting_provider_page_file_upload_inline)) },
+            )
+        }
+    }
+
     if (useServiceAccount) {
         CardGroup {
             item(

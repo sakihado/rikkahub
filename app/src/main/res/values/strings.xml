@@ -987,6 +987,11 @@
   <string name="setting_provider_page_recommend">Recommended providers</string>
   <string name="setting_provider_page_select_all">Select All (%1$d)</string>
   <string name="setting_provider_page_select_from_gallery">Select from Gallery</string>
+  <string name="setting_provider_page_file_upload">File Upload</string>
+  <string name="setting_provider_page_file_upload_native">Native file upload (File API)</string>
+  <string name="setting_provider_page_file_upload_native_desc">Upload PDF / video / audio to the Gemini Files API and send it as fileData. Keeps images and layout, supports large files, and is uploaded only once per conversation.</string>
+  <string name="setting_provider_page_file_upload_inline">Upload files inline (Base64)</string>
+  <string name="setting_provider_page_file_upload_inline_desc">Embed the file directly in the request body. Works with proxies that do not implement the upload endpoint; limited to about 15MB and re-sent on every turn.</string>
   <string name="setting_provider_page_service_account_email">Service Account Email</string>
   <string name="setting_provider_page_test">Test</string>
   <string name="setting_provider_page_test_connection">Test Connection</string>

@@ -392,6 +392,32 @@ internal class InteractionsAPI(
         flushContent()
     }
 
+    /** 附件部件按 fileData 引用 / inlineData Base64 两种方式渲染 */
+    private fun interactionsMediaContent(
+        type: String,
+        fileMeta: GoogleFileDataMetadata?,
+        defaultMime: String,
+        legacyInline: Boolean,
+        dataProvider: () -> String?,
+    ): JsonObject? {
+        val mime = fileMeta?.mimeType ?: defaultMime
+        fileMeta?.fileUri?.let { uri ->
+            return buildJsonObject {
+                put("type", type)
+                put("mime_type", mime)
+                put("uri", uri)
+            }
+        }
+        val inline = fileMeta?.inlineData == true || (fileMeta == null && legacyInline)
+        if (!inline) return null
+        val data = dataProvider() ?: return null
+        return buildJsonObject {
+            put("type", type)
+            put("mime_type", mime)
+            put("data", data)
+        }
+    }
+
     private fun UIMessagePart.toInteractionsContent(): JsonObject? = when (this) {
         is UIMessagePart.Text -> if (text.isEmpty()) {
             null
@@ -416,54 +442,33 @@ internal class InteractionsAPI(
         }
 
         is UIMessagePart.Video -> {
-            val fileMeta = metadataAs<GoogleFileDataMetadata>()
-            if (fileMeta?.fileUri != null) {
-                buildJsonObject {
-                    put("type", "video")
-                    put("mime_type", fileMeta.mimeType ?: "video/mp4")
-                    put("uri", fileMeta.fileUri)
-                }
-            } else {
-                encodeBase64(false).getOrNull()?.let { base64Data ->
-                    buildJsonObject {
-                        put("type", "video")
-                        put("mime_type", "video/mp4")
-                        put("data", base64Data)
-                    }
-                }
-            }
+            val videoPart = this
+            interactionsMediaContent(
+                type = "video",
+                fileMeta = videoPart.metadataAs<GoogleFileDataMetadata>(),
+                defaultMime = "video/mp4",
+                legacyInline = true,
+            ) { videoPart.encodeBase64(false).getOrNull() }
         }
 
         is UIMessagePart.Audio -> {
-            val fileMeta = metadataAs<GoogleFileDataMetadata>()
-            if (fileMeta?.fileUri != null) {
-                buildJsonObject {
-                    put("type", "audio")
-                    put("mime_type", fileMeta.mimeType ?: "audio/mp3")
-                    put("uri", fileMeta.fileUri)
-                }
-            } else {
-                encodeBase64(false).getOrNull()?.let { base64Data ->
-                    buildJsonObject {
-                        put("type", "audio")
-                        put("mime_type", "audio/mp3")
-                        put("data", base64Data)
-                    }
-                }
-            }
+            val audioPart = this
+            interactionsMediaContent(
+                type = "audio",
+                fileMeta = audioPart.metadataAs<GoogleFileDataMetadata>(),
+                defaultMime = "audio/mp3",
+                legacyInline = true,
+            ) { audioPart.encodeBase64(false).getOrNull() }
         }
 
         is UIMessagePart.Document -> {
-            val fileMeta = metadataAs<GoogleFileDataMetadata>()
-            if (fileMeta?.fileUri != null) {
-                buildJsonObject {
-                    put("type", "document")
-                    put("mime_type", fileMeta.mimeType ?: mime.ifBlank { "application/pdf" })
-                    put("uri", fileMeta.fileUri)
-                }
-            } else {
-                null
-            }
+            val documentPart = this
+            interactionsMediaContent(
+                type = "document",
+                fileMeta = documentPart.metadataAs<GoogleFileDataMetadata>(),
+                defaultMime = documentPart.mime.ifBlank { "application/pdf" },
+                legacyInline = false,
+            ) { documentPart.encodeBase64(false).getOrNull() }
         }
 
         else -> null

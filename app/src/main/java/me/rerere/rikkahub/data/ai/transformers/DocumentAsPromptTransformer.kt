@@ -20,7 +20,9 @@ object DocumentAsPromptTransformer : InputMessageTransformer {
         messages: List<UIMessage>,
     ): List<UIMessage> {
         val provider = ctx.model.findProvider(ctx.settings.providers)
-        val useGeminiNativeFileApi = provider is ProviderSetting.Google && !provider.vertexAI
+        // 只有在「原生上传」或「inline 上传」任一开启时，PDF 才跳过本地文本抽取，交给 GoogleProvider 原样发送
+        val useGeminiFileParts = provider is ProviderSetting.Google && !provider.vertexAI &&
+            (provider.useNativeFileUpload || provider.useInlineFileUpload)
 
         return withContext(Dispatchers.IO) {
             messages.map { message ->
@@ -32,7 +34,7 @@ object DocumentAsPromptTransformer : InputMessageTransformer {
                                 // 对于支持 Gemini File API 的原生文档（如 PDF），跳过本地纯文本提取，保留图片与排版交由 GoogleProvider 上传为 fileData
                                 val isPdf = document.mime.equals("application/pdf", ignoreCase = true) ||
                                     document.fileName.endsWith(".pdf", ignoreCase = true)
-                                if (useGeminiNativeFileApi && isPdf) {
+                                if (useGeminiFileParts && isPdf) {
                                     val path = resolveWorkspacePath(document)
                                     if (path != null) {
                                         add(
