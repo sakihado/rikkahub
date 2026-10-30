@@ -134,6 +134,7 @@ fun ChatList(
     onForkMessage: (UIMessage) -> Unit = {},
     onDelete: (UIMessage) -> Unit = {},
     onUpdateMessage: (MessageNode) -> Unit = {},
+    onRestoreAttachment: ((Uuid, Int) -> Unit)? = null,
     onClickSuggestion: (String) -> Unit = {},
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)? = null,
     onClearTranslation: (UIMessage) -> Unit = {},
@@ -176,6 +177,7 @@ fun ChatList(
                 onForkMessage = onForkMessage,
                 onDelete = onDelete,
                 onUpdateMessage = onUpdateMessage,
+                onRestoreAttachment = onRestoreAttachment,
                 onClickSuggestion = onClickSuggestion,
                 onTranslate = onTranslate,
                 onClearTranslation = onClearTranslation,
@@ -225,6 +227,7 @@ private fun ChatListNormal(
     onForkMessage: (UIMessage) -> Unit,
     onDelete: (UIMessage) -> Unit,
     onUpdateMessage: (MessageNode) -> Unit,
+    onRestoreAttachment: ((Uuid, Int) -> Unit)?,
     onClickSuggestion: (String) -> Unit,
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)?,
     onClearTranslation: (UIMessage) -> Unit,
@@ -383,6 +386,9 @@ private fun ChatListNormal(
                             },
                             onUpdate = {
                                 onUpdateMessage(it)
+                            },
+                            onRestoreAttachment = onRestoreAttachment?.let { callback ->
+                                { partIndex -> callback(node.currentMessage.id, partIndex) }
                             },
                             isFavorite = node.isFavorite,
                             onToggleFavorite = {

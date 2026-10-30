@@ -164,6 +164,30 @@ fun Conversation.lastContextTokens(): Int? {
     return message.contextTokens()
 }
 
+/** 按 messageId 替换当前选中的那条消息的内容；找不到时原样返回。 */
+internal fun Conversation.updateMessageById(
+    messageId: Uuid,
+    transform: (UIMessage) -> UIMessage,
+): Conversation {
+    var changed = false
+    val nodes = messageNodes.map { node ->
+        if (node.messages.none { it.id == messageId }) {
+            node
+        } else {
+            val newMessages = node.messages.map { message ->
+                if (message.id == messageId) transform(message) else message
+            }
+            if (newMessages == node.messages) {
+                node
+            } else {
+                changed = true
+                node.copy(messages = newMessages)
+            }
+        }
+    }
+    return if (changed) copy(messageNodes = nodes) else this
+}
+
 /** 在 [afterNodeId] 节点之后插入压缩检查点；该节点已不存在时返回 null。 */
 internal fun Conversation.insertContextCheckpoint(afterNodeId: Uuid, summary: String): Conversation? {
     val index = messageNodes.indexOfFirst { it.id == afterNodeId }

@@ -120,6 +120,19 @@ data class GoogleFileDataMetadata(
 ) : PartMetadata
 
 /**
+ * 附件体积压缩：该部件已被「压缩附件」标记为省略，请求时替换成一行占位文本。
+ *
+ * 原文件仍然保留在本地，用户可以在界面上点单张恢复。
+ */
+@Serializable
+data class AttachmentBudgetMetadata(
+    val omitted: Boolean? = null,
+    // 省略时估算的请求体积（字节），仅用于界面展示与「压缩附件」的体积预览
+    @SerialName("omitted_bytes")
+    val omittedBytes: Long? = null,
+) : PartMetadata
+
+/**
  * 文件编辑类工具(如 workspace_edit_file)输出部件的元数据,
  * 携带 unified diff 文本供 UI 渲染 diff view, 不会发送给 API
  */

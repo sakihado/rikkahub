@@ -37,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -49,9 +50,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.fastForEach
 import kotlin.uuid.Uuid
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.ui.limitContext
+import me.rerere.ai.util.AttachmentSize
+import me.rerere.ai.util.RequestSizeEstimate
+import me.rerere.ai.util.estimateRequestBytes
+import me.rerere.ai.util.listAttachments
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowLeft01
 import me.rerere.hugeicons.stroke.ArrowRight01
@@ -82,6 +90,7 @@ import me.rerere.rikkahub.ui.components.ui.ExtensionSelector
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.hooks.ChatInputState
+import me.rerere.rikkahub.utils.formatBytes
 import me.rerere.rikkahub.utils.formatNumber
 import me.rerere.workspace.WorkspaceShellStatus
 import org.koin.compose.koinInject
@@ -110,6 +119,7 @@ internal fun FilesPicker(
     state: ChatInputState,
     mcpManager: McpManager,
     onCompressContext: (additionalPrompt: String, keepRecentMessages: Int) -> Job,
+    onCompactAttachments: (keepRecentMessages: Int) -> Job,
     onUpdateAssistant: (Assistant) -> Unit,
     onUpdateWorkspaceCwd: (String?) -> Unit,
     onUpdateSearchMode: (SearchMode) -> Unit,
@@ -136,6 +146,23 @@ internal fun FilesPicker(
     }
     val showCwd = boundWorkspace != null && boundWorkspace.shellStatus == WorkspaceShellStatus.READY.name
     var showCwdSheet by remember { mutableStateOf(false) }
+    var showCompactAttachmentsDialog by remember { mutableStateOf(false) }
+
+    // 请求体积与附件清单：要读磁盘文件长度，放到 IO 线程算，避免展开面板时掉帧
+    val attachmentStats by produceState(
+        initialValue = RequestAttachmentStats.Empty,
+        conversation.messageNodes,
+        assistant.contextMessageLimit,
+        provider,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val messages = conversation.currentMessages.limitContext(assistant.contextMessageLimit)
+            RequestAttachmentStats(
+                estimate = messages.estimateRequestBytes(provider),
+                attachments = messages.listAttachments(provider),
+            )
+        }
+    }
 
     var page by remember { mutableStateOf(FilesPickerPage.MAIN) }
     // 在子页面时，返回键回到上一级而不是关闭 sheet
@@ -221,7 +248,8 @@ internal fun FilesPicker(
                 val showMcp = settings.mcpServers.isNotEmpty()
                 // 限制了上下文消息数就是滚动上下文，旧消息会自动移出，不需要压缩
                 val showCompress = assistant.contextMessageLimit <= 0
-                val itemCount = 2 + listOf(showWorkspace, showWorkspace && showCwd, showMcp, showCompress).count { it }
+                // 压缩附件和滚动上下文无关：窗口内的附件一样可能撑爆请求体积
+                val itemCount = 3 + listOf(showWorkspace, showWorkspace && showCwd, showMcp, showCompress).count { it }
                 var itemIndex = 0
                 Column(
                     verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
@@ -358,6 +386,59 @@ internal fun FilesPicker(
                             Text(stringResource(R.string.chat_page_compress_context))
                         }
                     }
+
+                    // 压缩附件：省略较早的图片/文档，降低单次请求体积
+                    SegmentedListItem(
+                        onClick = { showCompactAttachmentsDialog = true },
+                        shapes = ListItemDefaults.segmentedShapes(index = itemIndex++, count = itemCount),
+                        leadingContent = {
+                            Icon(
+                                imageVector = HugeIcons.Files02,
+                                contentDescription = null,
+                            )
+                        },
+                        trailingContent = {
+                            val estimate = attachmentStats.estimate
+                            val limitMb = chatModel?.requestSizeLimitMb ?: 0
+                            if (estimate != null) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = if (limitMb > 0) {
+                                                "${estimate.bytes.formatBytes()} / ${limitMb}MB"
+                                            } else {
+                                                estimate.bytes.formatBytes()
+                                            },
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        if (estimate.attachmentCount > 0) {
+                                            Text(
+                                                text = stringResource(
+                                                    R.string.chat_compact_attachments_count,
+                                                    estimate.attachmentCount,
+                                                    estimate.omittedCount,
+                                                ),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    if (limitMb > 0) {
+                                        ContextUsageRing(
+                                            fraction = estimate.bytes.toFloat() /
+                                                (limitMb.toFloat() * 1024f * 1024f)
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                    ) {
+                        Text(stringResource(R.string.chat_compact_attachments))
+                    }
                 }
             }
         }
@@ -381,6 +462,26 @@ internal fun FilesPicker(
             onShowCompressDialogChange(false)
             onDismiss()
         }, onConfirm = onCompressContext)
+    }
+
+    if (showCompactAttachmentsDialog) {
+        CompactAttachmentsDialog(
+            attachments = attachmentStats.attachments,
+            currentBytes = attachmentStats.estimate?.bytes ?: 0L,
+            limitMb = chatModel?.requestSizeLimitMb ?: 0,
+            onDismiss = { showCompactAttachmentsDialog = false },
+            onConfirm = onCompactAttachments,
+        )
+    }
+}
+
+/** 底部菜单里展示的请求体积与附件清单 */
+private data class RequestAttachmentStats(
+    val estimate: RequestSizeEstimate?,
+    val attachments: List<AttachmentSize>,
+) {
+    companion object {
+        val Empty = RequestAttachmentStats(null, emptyList())
     }
 }
 

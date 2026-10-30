@@ -71,6 +71,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyUIMessage
+import me.rerere.ai.util.isOmitted
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.File02
 import me.rerere.hugeicons.stroke.MusicNote03
@@ -117,6 +118,7 @@ fun ChatMessage(
     onShare: () -> Unit,
     onDelete: () -> Unit,
     onUpdate: (MessageNode) -> Unit,
+    onRestoreAttachment: ((partIndex: Int) -> Unit)? = null,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
     onTranslate: ((UIMessage, Locale) -> Unit)? = null,
@@ -187,6 +189,7 @@ fun ChatMessage(
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
+                onRestoreAttachment = onRestoreAttachment,
             )
 
             message.translation?.let { translation ->
@@ -297,6 +300,7 @@ private fun MessagePartsBlock(
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
+    onRestoreAttachment: ((partIndex: Int) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // 消息输出HapticFeedback
@@ -461,43 +465,50 @@ private fun MessagePartsBlock(
                     }
 
                     is UIMessagePart.Video -> {
-                        ChatMessageMediaTile(
-                            icon = HugeIcons.Video01,
-                            onClick = { context.openLocalFile(part.url) },
-                        )
-                    }
-
-                    is UIMessagePart.Audio -> {
-                        ChatMessageMediaTile(
-                            icon = HugeIcons.MusicNote03,
-                            onClick = { context.openLocalFile(part.url) },
-                        )
-                    }
-
-                    is UIMessagePart.Image -> {
-                        val isImageLoading =
-                            part.url.isBlank() || part.url.matches(Regex("^data:image/[^;]*;base64,\\s*$"))
-                        if (isImageLoading) {
-                            Box(
-                                modifier = Modifier
-                                    .size(72.dp)
-                                    .clip(MaterialTheme.shapes.large)
-                                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    .shimmer(isLoading = true)
-                            )
-                        } else {
-                            ZoomableAsyncImage(
-                                model = part.url,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .clip(MaterialTheme.shapes.large)
-                                    .height(72.dp)
+                        AttachmentOmission(part, block.index, onRestoreAttachment) {
+                            ChatMessageMediaTile(
+                                icon = HugeIcons.Video01,
+                                onClick = { context.openLocalFile(part.url) },
                             )
                         }
                     }
 
+                    is UIMessagePart.Audio -> {
+                        AttachmentOmission(part, block.index, onRestoreAttachment) {
+                            ChatMessageMediaTile(
+                                icon = HugeIcons.MusicNote03,
+                                onClick = { context.openLocalFile(part.url) },
+                            )
+                        }
+                    }
+
+                    is UIMessagePart.Image -> {
+                        val isImageLoading =
+                            part.url.isBlank() || part.url.matches(Regex("^data:image/[^;]*;base64,\\\\s*$"))
+                        AttachmentOmission(part, block.index, onRestoreAttachment) {
+                            if (isImageLoading) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .clip(MaterialTheme.shapes.large)
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .shimmer(isLoading = true)
+                                )
+                            } else {
+                                ZoomableAsyncImage(
+                                    model = part.url,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .clip(MaterialTheme.shapes.large)
+                                        .height(72.dp)
+                                )
+                            }
+                        }
+                    }
+
                     is UIMessagePart.Document -> {
-                        ChatMessageFileChip(
+                        AttachmentOmission(part, block.index, onRestoreAttachment) {
+                            ChatMessageFileChip(
                             text = part.fileName,
                             onClick = { context.openLocalFile(part.url) },
                             icon = {
@@ -528,6 +539,7 @@ private fun MessagePartsBlock(
                                 }
                             },
                         )
+                        }
                     }
 
                     else -> {
@@ -541,6 +553,40 @@ private fun MessagePartsBlock(
     // Annotations (always rendered at the end)
     if (annotations.isNotEmpty()) {
         ChatMessageCitations(annotations = annotations)
+    }
+}
+
+/**
+ * 附件被「压缩附件」标记为省略时，在缩略图/文件条上盖一层半透明遮罩，点击恢复。
+ * 原文件仍在本地，图片依然可以正常预览。
+ */
+@Composable
+private fun AttachmentOmission(
+    part: UIMessagePart,
+    partIndex: Int,
+    onRestore: ((partIndex: Int) -> Unit)?,
+    content: @Composable () -> Unit,
+) {
+    if (onRestore == null || !part.isOmitted()) {
+        content()
+        return
+    }
+    Box {
+        content()
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .clip(MaterialTheme.shapes.large)
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.55f))
+                .clickable { onRestore(partIndex) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = stringResource(R.string.chat_attachment_omitted),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.inverseOnSurface,
+            )
+        }
     }
 }
 

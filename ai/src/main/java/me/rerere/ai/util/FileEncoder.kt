@@ -6,10 +6,13 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.util.Base64
 import android.util.Base64OutputStream
+import android.util.LruCache
 import androidx.core.net.toUri
 import me.rerere.ai.ui.UIMessagePart
 import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 private val supportedTypes = setOf(
     "image/jpeg",
@@ -59,11 +62,10 @@ fun UIMessagePart.Image.encodeBase64(withPrefix: Boolean = true): Result<Encoded
                 throw IllegalArgumentException("File does not exist: ${this.url}")
             }
             val mimeType = file.guessMimeType().getOrThrow()
-            // 统一进行压缩处理
-            val (encoded, outputMimeType) = file.compressAndEncode(mimeType)
+            val encoded = file.encodeForRequest(mimeType)
             EncodedImage(
-                base64 = if (withPrefix) "data:$outputMimeType;base64,$encoded" else encoded,
-                mimeType = outputMimeType
+                base64 = if (withPrefix) "data:${encoded.mimeType};base64,${encoded.base64}" else encoded.base64,
+                mimeType = encoded.mimeType
             )
         }
 
@@ -132,48 +134,123 @@ fun UIMessagePart.Document.encodeBase64(withPrefix: Boolean = true): Result<Stri
     }
 }
 
-private fun File.compressAndEncode(
-    mimeType: String,
-    maxDimension: Int = 10_000,
-    maxPixels: Long = 16_000_000L,
-    quality: Int = 85
-): Pair<String, String> {
-    // GIF 保持原样（可能是动图）
+// 图片进入请求前的压缩参数：长边 2048、像素 400 万、JPEG q85
+// 服务端最终也会把图缩到这个量级（Claude 1568 / Gemini 768 分块），再大只会白耗体积与 token
+private const val IMAGE_MAX_DIMENSION = 2048
+private const val IMAGE_MAX_PIXELS = 4_000_000L
+private const val IMAGE_JPEG_QUALITY = 85
+// 编码结果按 KB 计数缓存 24MB，避免每轮请求重复解码+编码历史图片
+private const val IMAGE_CACHE_MAX_KB = 24 * 1024
+// 未编码过的图片在估算体积时使用的上限（长边 2048 的 JPEG 实际远小于这个值）
+private const val IMAGE_ESTIMATE_MAX_BYTES = 700_000L
+
+internal data class EncodedImageBytes(
+    val base64: String,
+    val mimeType: String,
+    val byteSize: Long,
+)
+
+private val encodedImageCache = object : LruCache<String, ByteArray>(IMAGE_CACHE_MAX_KB) {
+    override fun sizeOf(key: String, value: ByteArray): Int = value.size / 1024
+}
+
+private fun File.imageCacheKey(): String =
+    "$absolutePath|${lastModified()}|${length()}|$IMAGE_MAX_DIMENSION|$IMAGE_MAX_PIXELS|$IMAGE_JPEG_QUALITY"
+
+/** 压缩（或原样返回 GIF）后的字节；命中缓存时直接返回 */
+private fun File.compressedBytes(mimeType: String): ByteArray {
+    // GIF 保持原样（可能是动图），也不进缓存
     if (mimeType == "image/gif") {
-        return Pair(encodeToBase64Streaming(), mimeType)
+        return readBytes()
     }
+    val key = imageCacheKey()
+    encodedImageCache.get(key)?.let { return it }
+    val bytes = compressToJpegBytes()
+    encodedImageCache.put(key, bytes)
+    return bytes
+}
 
-    // 读取图片尺寸
-    val options = BitmapFactory.Options().apply {
-        inJustDecodeBounds = true
-    }
-    BitmapFactory.decodeFile(absolutePath, options)
-
-    options.inSampleSize = calculateImageInSampleSize(
-        width = options.outWidth,
-        height = options.outHeight,
-        maxDimension = maxDimension,
-        maxPixels = maxPixels
+private fun File.encodeForRequest(mimeType: String): EncodedImageBytes {
+    val bytes = compressedBytes(mimeType)
+    val outputMimeType = if (mimeType == "image/gif") mimeType else "image/jpeg"
+    return EncodedImageBytes(
+        base64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
+        mimeType = outputMimeType,
+        byteSize = bytes.size.toLong(),
     )
-    options.inJustDecodeBounds = false
+}
 
-    val bitmap = BitmapFactory.decodeFile(absolutePath, options)
+/**
+ * 估算图片编码后（Base64 之后）的字节数。
+ *
+ * [exact] 为 true 时会真的编码一次（结果进缓存，随后的请求直接复用），
+ * 用于发送前的体积校验；界面展示用 false，避免展开面板时卡顿。
+ */
+fun estimateImageBase64Bytes(file: File, mimeType: String, exact: Boolean): Long {
+    if (!file.exists()) return 0
+    val rawBytes = if (mimeType == "image/gif") {
+        file.length()
+    } else {
+        encodedImageCache.get(file.imageCacheKey())?.size?.toLong()
+            ?: if (exact) {
+                runCatching { file.compressedBytes(mimeType).size.toLong() }
+                    .getOrElse { minOf(file.length(), IMAGE_ESTIMATE_MAX_BYTES) }
+            } else {
+                minOf(file.length(), IMAGE_ESTIMATE_MAX_BYTES)
+            }
+    }
+    return rawBytes / 3 * 4 + 4
+}
+
+private fun File.compressToJpegBytes(): ByteArray {
+    // 先用 inSampleSize 粗缩（只能是 2 的幂），再做一次精确缩放
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(absolutePath, bounds)
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = calculateImageInSampleSize(
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            maxDimension = IMAGE_MAX_DIMENSION,
+            maxPixels = IMAGE_MAX_PIXELS
+        )
+        inJustDecodeBounds = false
+    }
+
+    val decoded = BitmapFactory.decodeFile(absolutePath, options)
         ?: throw IllegalArgumentException("Failed to decode image: $absolutePath")
-    val normalizedBitmap = normalizeByExif(bitmap)
+
+    var bitmap = normalizeByExif(decoded)
+    if (bitmap !== decoded) decoded.recycle()
+
+    val scaled = bitmap.scaleToFit(IMAGE_MAX_DIMENSION, IMAGE_MAX_PIXELS)
+    if (scaled !== bitmap) bitmap.recycle()
 
     return try {
-        val byteArrayOutputStream = ByteArrayOutputStream()
-        // 强制使用 JPEG 格式，因为很多提供商不支持 webp
-        Base64OutputStream(byteArrayOutputStream, Base64.NO_WRAP).use { base64Stream ->
-            normalizedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, base64Stream)
+        ByteArrayOutputStream().use { output ->
+            scaled.compress(Bitmap.CompressFormat.JPEG, IMAGE_JPEG_QUALITY, output)
+            output.toByteArray()
         }
-        Pair(byteArrayOutputStream.toString(Charsets.ISO_8859_1.name()), "image/jpeg")
     } finally {
-        if (normalizedBitmap !== bitmap) {
-            normalizedBitmap.recycle()
-        }
-        bitmap.recycle()
+        scaled.recycle()
     }
+}
+
+/** 精确缩放到「长边 ≤ [maxDimension] 且像素 ≤ [maxPixels]」的框内，不放大 */
+private fun Bitmap.scaleToFit(maxDimension: Int, maxPixels: Long): Bitmap {
+    val sourceWidth = width
+    val sourceHeight = height
+    if (sourceWidth <= 0 || sourceHeight <= 0) return this
+
+    var scale = minOf(1f, maxDimension.toFloat() / maxOf(sourceWidth, sourceHeight))
+    val scaledPixels = (sourceWidth * scale).toLong() * (sourceHeight * scale).toLong()
+    if (scaledPixels > maxPixels) {
+        scale *= sqrt(maxPixels.toDouble() / scaledPixels.toDouble()).toFloat()
+    }
+    if (scale >= 0.999f) return this
+
+    val targetWidth = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
+    val targetHeight = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(this, targetWidth, targetHeight, true)
 }
 
 private fun File.normalizeByExif(bitmap: Bitmap): Bitmap {
@@ -241,6 +318,9 @@ internal fun calculateImageInSampleSize(
     }
     return inSampleSize
 }
+
+/** 图片 MIME（按文件头嗅探），失败时返回 null */
+internal fun File.guessImageMimeTypeOrNull(): String? = guessMimeType().getOrNull()
 
 private fun File.guessMimeType(): Result<String> = runCatching {
     inputStream().use { input ->

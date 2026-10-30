@@ -19,6 +19,7 @@ import me.rerere.ai.ui.limitContext
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.prompts.buildMemoryPrompt
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
+import me.rerere.rikkahub.data.ai.transformers.AttachmentOmitTransformer
 import me.rerere.rikkahub.data.ai.transformers.Base64ImageToLocalFileTransformer
 import me.rerere.rikkahub.data.ai.transformers.DocumentAsPromptTransformer
 import me.rerere.rikkahub.data.ai.transformers.InputMessageTransformer
@@ -27,6 +28,7 @@ import me.rerere.rikkahub.data.ai.transformers.OutputMessageTransformer
 import me.rerere.rikkahub.data.ai.transformers.PlaceholderTransformer
 import me.rerere.rikkahub.data.ai.transformers.PromptInjectionTransformer
 import me.rerere.rikkahub.data.ai.transformers.RegexOutputTransformer
+import me.rerere.rikkahub.data.ai.transformers.RequestSizeGuardTransformer
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
 import me.rerere.rikkahub.data.ai.transformers.ThinkTagTransformer
 import me.rerere.rikkahub.data.ai.transformers.TimeReminderTransformer
@@ -79,6 +81,8 @@ class ChatRequestFactory(
     workspaceRepository: WorkspaceRepository,
 ) {
     private val inputTransformers: List<InputMessageTransformer> = listOf(
+        // 已省略的附件必须在文档解析 / OCR 之前换成占位文本，否则仍会被解析和识别
+        AttachmentOmitTransformer,
         TimeReminderTransformer,
         PromptInjectionTransformer,
         PlaceholderTransformer,
@@ -86,6 +90,8 @@ class ChatRequestFactory(
         OcrTransformer,
         templateTransformer,
         WorkspaceReminderTransformer(workspaceRepository),
+        // 体积校验放最后：前面的转换器会改变最终内容
+        RequestSizeGuardTransformer,
     )
 
     private val outputTransformers: List<OutputMessageTransformer> = listOf(

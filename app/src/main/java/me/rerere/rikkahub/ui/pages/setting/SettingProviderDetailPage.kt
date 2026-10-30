@@ -660,6 +660,13 @@ private fun ModelSettingsForm(
                                     onModelChange(model.copy(contextLength = it))
                                 }
                             )
+
+                            ModelRequestSizeSelector(
+                                requestSizeLimitMb = model.requestSizeLimitMb,
+                                onUpdateRequestSizeLimit = {
+                                    onModelChange(model.copy(requestSizeLimitMb = it))
+                                }
+                            )
                         }
                     }
                 }
@@ -1208,6 +1215,58 @@ private fun ModelContextLengthSelector(
             },
             modifier = Modifier.fillMaxWidth(),
             suffix = { Text("tokens") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+            isError = (customText.toIntOrNull() ?: 0) <= 0,
+        )
+    }
+}
+
+// 单次请求体积上限的常用档位（MB），0 表示不限制，其余走自定义输入
+private val RequestSizePresets = listOf(0, 20, 32, 50)
+
+@Composable
+private fun ModelRequestSizeSelector(
+    requestSizeLimitMb: Int,
+    onUpdateRequestSizeLimit: (Int) -> Unit
+) {
+    var custom by remember { mutableStateOf(requestSizeLimitMb > 0 && requestSizeLimitMb !in RequestSizePresets) }
+    var customText by remember { mutableStateOf(if (requestSizeLimitMb > 0) requestSizeLimitMb.toString() else "") }
+
+    Text(
+        stringResource(R.string.setting_provider_page_request_size_limit),
+        style = MaterialTheme.typography.titleSmall
+    )
+    // null 表示自定义
+    ConnectedChoiceButtons(
+        options = RequestSizePresets + null,
+        selected = if (custom) null else requestSizeLimitMb,
+        onSelect = { preset ->
+            custom = preset == null
+            if (preset != null) {
+                customText = if (preset == 0) "" else preset.toString()
+                onUpdateRequestSizeLimit(preset)
+            }
+        },
+    ) { preset, selected ->
+        ConnectedChoiceLabel(
+            text = when (preset) {
+                null -> stringResource(R.string.setting_provider_page_request_size_custom)
+                0 -> stringResource(R.string.setting_provider_page_request_size_unlimited)
+                else -> "${preset}MB"
+            },
+            selected = selected,
+        )
+    }
+    AnimatedVisibility(visible = custom) {
+        OutlinedTextField(
+            value = customText,
+            onValueChange = { value ->
+                customText = value.filter { it.isDigit() }
+                customText.toIntOrNull()?.takeIf { it > 0 }?.let(onUpdateRequestSizeLimit)
+            },
+            modifier = Modifier.fillMaxWidth(),
+            suffix = { Text("MB") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             singleLine = true,
             isError = (customText.toIntOrNull() ?: 0) <= 0,

@@ -48,6 +48,7 @@ import me.rerere.rikkahub.data.ai.prompts.buildCompressPrompt
 import me.rerere.rikkahub.data.ai.tools.InvalidMcpServerNamesException
 import me.rerere.rikkahub.data.ai.tools.shouldUseExternalWebSearch
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
@@ -63,12 +64,16 @@ import me.rerere.rikkahub.data.model.fork
 import me.rerere.rikkahub.data.model.getAssistantOf
 import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.model.getStoredAssistantOf
+import me.rerere.rikkahub.data.model.hasRestorableAttachments
 import me.rerere.rikkahub.data.model.insertContextCheckpoint
 import me.rerere.rikkahub.data.model.isAwaitingToolApproval
 import me.rerere.rikkahub.data.model.localFileUrls
+import me.rerere.rikkahub.data.model.omitAttachments
 import me.rerere.rikkahub.data.model.replaceUserRegexes
+import me.rerere.rikkahub.data.model.restoreAttachment
 import me.rerere.rikkahub.data.model.selectBranch
 import me.rerere.rikkahub.data.model.toMessageNode
+import me.rerere.rikkahub.data.model.updateMessageById
 import me.rerere.rikkahub.data.model.withAssistantUpdate
 import me.rerere.rikkahub.data.model.withNodeFavorite
 import me.rerere.rikkahub.data.model.withToolApproval
@@ -863,6 +868,82 @@ class ChatService(
                     summary = summary,
                 ) ?: throw IllegalStateException(context.getString(R.string.chat_page_compress_conversation_changed))
                 updated.copy(chatSuggestions = emptyList())
+            }
+            session.flush()
+        }
+    }
+
+    /**
+     * 压缩附件：把较早消息里的图片/视频/音频/文档标记为省略。
+     *
+     * 之后构建请求时这些部件会变成一行占位文本，从而降低单次请求体积；原文件仍在本地，
+     * 用户可以点单张恢复。只处理真正会发给模型的那部分消息：最后一个压缩检查点之后，
+     * 并按 contextMessageLimit 截断，保留最近 [keepRecentMessages] 条消息里的附件不动。
+     */
+    suspend fun compactAttachments(
+        conversationId: Uuid,
+        keepRecentMessages: Int = 6,
+    ): Result<Unit> = runCatching {
+        withLoadedSession<Unit>(conversationId) { session ->
+            check(!session.isGenerating) {
+                context.getString(R.string.chat_compact_attachments_blocked_generating)
+            }
+
+            val settings = settingsStore.awaitLoaded()
+            val conversation = session.state.value
+            val nodes = conversation.messageNodes
+            val checkpointIndex = nodes.indexOfLast { it.currentMessage.isContextCheckpoint }
+            val assistant = settings.getAssistantOf(conversation)
+            val limit = assistant.contextMessageLimit
+
+            val inRange = nodes.subList(checkpointIndex + 1, nodes.size)
+            val window = if (limit > 0) inRange.takeLast(limit) else inRange
+            val keep = keepRecentMessages.coerceAtLeast(0)
+            val targets = window.dropLast(keep).filter { it.currentMessage.hasRestorableAttachments() }
+
+            if (targets.isEmpty()) {
+                throw IllegalStateException(
+                    context.getString(R.string.chat_compact_attachments_nothing)
+                )
+            }
+
+            val provider = settings.getChatModelOf(conversation)?.findProvider(settings.providers)
+            val replacements = mutableMapOf<Uuid, UIMessage>()
+            for (node in targets) {
+                val message = node.currentMessage
+                val updated = message.omitAttachments(provider)
+                if (updated != message) replacements[message.id] = updated
+            }
+
+            session.update { latest ->
+                latest.copy(
+                    messageNodes = latest.messageNodes.map { node ->
+                        val replaced = node.messages.map { message ->
+                            replacements[message.id] ?: message
+                        }
+                        if (replaced == node.messages) node else node.copy(messages = replaced)
+                    }
+                )
+            }
+            session.flush()
+        }
+    }
+
+    /** 恢复某个附件（清除「已省略」标记），让它重新参与请求 */
+    suspend fun restoreAttachment(
+        conversationId: Uuid,
+        messageId: Uuid,
+        partIndex: Int,
+    ): Result<Unit> = runCatching {
+        withLoadedSession<Unit>(conversationId) { session ->
+            session.update { latest ->
+                latest.updateMessageById(messageId) { message ->
+                    message.copy(
+                        parts = message.parts.mapIndexed { index, part ->
+                            if (index == partIndex) part.restoreAttachment() else part
+                        }
+                    )
+                }
             }
             session.flush()
         }

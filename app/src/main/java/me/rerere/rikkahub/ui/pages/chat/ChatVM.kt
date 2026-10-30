@@ -251,6 +251,22 @@ class ChatVM(
         }
     }
 
+    fun handleCompactAttachments(keepRecentMessages: Int): Job {
+        return viewModelScope.launch {
+            chatService.compactAttachments(_conversationId, keepRecentMessages).onFailure {
+                chatService.addError(it, title = context.getString(R.string.error_title_compact_attachments))
+            }
+        }
+    }
+
+    fun restoreAttachment(messageId: Uuid, partIndex: Int) {
+        viewModelScope.launch {
+            chatService.restoreAttachment(_conversationId, messageId, partIndex).onFailure {
+                chatService.addError(it, title = context.getString(R.string.error_title_compact_attachments))
+            }
+        }
+    }
+
     suspend fun forkMessage(message: UIMessage): Conversation {
         return chatService.forkConversationAtMessage(_conversationId, message.id)
     }
