@@ -75,7 +75,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            // 没有配置签名（local.properties 里没有 storeFile）时产出 unsigned apk，
+            // 由构建流程在本地另行签名，避免 validateSigning 直接失败
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
             optimization {
                 enable = true
             }
