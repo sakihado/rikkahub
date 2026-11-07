@@ -1,4 +1,4 @@
-name: Build File API Debug APK
+name: Build APKs
 
 on:
   workflow_dispatch:
@@ -60,7 +60,7 @@ jobs:
               {
                 "client_info": {
                   "mobilesdk_app_id": "1:123456789012:android:0123456789abcdef012345",
-                  "android_client_info": { "package_name": "me.rerere.rikkahub.debug" }
+                  "android_client_info": { "package_name": "me.rerere.rikkahub" }
                 },
                 "oauth_client": [],
                 "api_key": [ { "current_key": "AIzaSyDUMMYKEYFORPERSONALBUILDONLY00000" } ],
@@ -69,7 +69,7 @@ jobs:
               {
                 "client_info": {
                   "mobilesdk_app_id": "1:123456789012:android:0123456789abcdef012345",
-                  "android_client_info": { "package_name": "me.rerere.rikkahub" }
+                  "android_client_info": { "package_name": "me.rerere.rikkahub.debug" }
                 },
                 "oauth_client": [],
                 "api_key": [ { "current_key": "AIzaSyDUMMYKEYFORPERSONALBUILDONLY00000" } ],
@@ -80,14 +80,20 @@ jobs:
           }
           JSON
 
-      - name: Build debug APK
+      - name: Build release + debug (arm64)
         run: |
           chmod +x gradlew
-          ./gradlew assembleGithubDebug --no-daemon
+          ./gradlew assembleGithubRelease assembleGithubDebug --no-daemon
 
-      - name: Upload APK
+      - name: Collect arm64 APKs
+        run: |
+          mkdir -p out
+          find app/build/outputs/apk/github -name "*arm64-v8a*.apk" -exec cp {} out/ \;
+          ls -lh out
+
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: rikkahub-fileapi-debug
-          path: app/build/outputs/apk/github/debug/*.apk
+          name: rikkahub-apks
+          path: out/*.apk
           retention-days: 14
