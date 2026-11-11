@@ -1876,4 +1876,17 @@
   <string name="chat_message_tool_phone_use_open_app_name">Open app: %1$s</string>
   <string name="chat_message_tool_phone_use_list_apps">List apps</string>
   <string name="chat_message_tool_phone_use_wait">Wait %1$s seconds</string>
+  <string name="chat_message_tool_phone_use_open_uri">Open link</string>
+  <string name="chat_message_tool_phone_use_open_uri_target">Open link: %1$s</string>
+  <string name="chat_message_tool_phone_use_dump_activity">Inspect top activity</string>
+  <string name="chat_message_tool_phone_use_notifications">Read notifications</string>
+  <string name="assistant_page_local_tools_phone_use_root_active">Active via Root / Shell engine (Accessibility service not required)</string>
+  <string name="assistant_page_local_tools_phone_use_root_ready">Phone Use attached via Root / Shell engine</string>
+  <string name="assistant_page_local_tools_android_shell_title">Android Shell (Root / Sui)</string>
+  <string name="assistant_page_local_tools_android_shell_desc">Execute host Android diagnostic &amp; control commands directly (read-only auto-runs, changes require approval)</string>
+  <string name="assistant_page_local_tools_android_shell_status_root">Root / Shell (UID 2000 &amp; UID 0) granted</string>
+  <string name="assistant_page_local_tools_android_shell_status_unprivileged">Root not granted; running in app sandbox only</string>
+  <string name="tool_ui_android_shell">Host Shell: %1$s</string>
+  <string name="tool_ui_android_shell_default">Android Host Shell</string>
+  <string name="tool_ui_android_shell_blocked">Blocked by safety policy</string>
 </resources>

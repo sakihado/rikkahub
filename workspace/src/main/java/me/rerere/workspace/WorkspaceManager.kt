@@ -251,7 +251,11 @@ class WorkspaceManager(
     /** 交互式终端启动前的准备: 补齐目录, 并按当前网络刷新 Rootfs 的 DNS 等配置 */
     fun prepareTerminal(root: String, nameservers: List<String>) {
         ensureWorkspace(root)
-        bindMounts.forEach { it.source.mkdirs() }
+        bindMounts.forEach { mount ->
+            if (mount.writable || !mount.source.exists()) {
+                runCatching { mount.source.mkdirs() }
+            }
+        }
         RootfsPatcher().patch(linuxDir(root), RootfsPatchOptions(nameservers = nameservers))
     }
 

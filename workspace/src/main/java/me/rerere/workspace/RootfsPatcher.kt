@@ -17,6 +17,7 @@ class RootfsPatcher {
         ensureLocale(etcDir, options.locale)
         ensureGroupNames(etcDir, options.groupIds.ifEmpty { currentSupplementaryGroupIds() })
         ensureTempDirs(linuxDir)
+        ensureHostBridgeScripts(linuxDir)
     }
 
     private fun ensureRootfsDns(
@@ -154,6 +155,35 @@ class RootfsPatcher {
         }
     }
 
+    /**
+     * 在 Rootfs 的 `/usr/local/bin/` 下安装：
+     * 1. `host-sh`（及别名 `rish`）：通过本地桥接守护进程调用 Android 宿主机命令，stdout 字节流无损回传。
+     * 2. `rm` / `rmdir` / `unlink` 防误删包装器：操作 `/workspace`、`/tmp` 时原样透传；
+     *    一旦目标解析到 `/sdcard` 或 `/storage`，自动移入 `/sdcard/.Trash-RikkaHub/` 回收站并禁止二次抹除。
+     * 3. 若首次检测到 gcc/cc 可用，顺手编译 `/usr/local/lib/libsafesdcard.so` 供 Python/Node 的 unlink 系统调用兜底。
+     */
+    private fun ensureHostBridgeScripts(linuxDir: File) {
+        val binDir = File(linuxDir, "usr/local/bin").apply { mkdirs() }
+
+        writeExecutableIfChanged(File(binDir, "host-sh"), HOST_SH_SCRIPT)
+        writeExecutableIfChanged(File(binDir, "rish"), RISH_WRAPPER_SCRIPT)
+        writeExecutableIfChanged(File(binDir, "rm"), SAFE_RM_SCRIPT)
+        writeExecutableIfChanged(File(binDir, "rmdir"), SAFE_RMDIR_SCRIPT)
+        writeExecutableIfChanged(File(binDir, "unlink"), SAFE_UNLINK_SCRIPT)
+    }
+
+    private fun writeExecutableIfChanged(file: File, content: String) {
+        if (Files.isSymbolicLink(file.toPath())) {
+            file.delete()
+        }
+        if (!file.isFile || file.readText() != content) {
+            file.writeText(content)
+        }
+        file.setReadable(true, false)
+        file.setWritable(true, true)
+        file.setExecutable(true, false)
+    }
+
     private fun currentSupplementaryGroupIds(): List<Long> {
         val status = File("/proc/self/status")
         if (!status.isFile) return emptyList()
@@ -179,6 +209,192 @@ class RootfsPatcher {
             "8.8.8.8",
             "223.5.5.5",
         )
+
+        private val HOST_SH_SCRIPT = """
+            #!/bin/sh
+            # Execute a read-only diagnostic command on the real Android host via RikkaHub HostBridgeDaemon
+            ENDPOINT_FILE="/run/host_bridge/endpoint"
+            if [ ! -f "${'$'}ENDPOINT_FILE" ]; then
+              echo "host-sh: /run/host_bridge/endpoint not found (host bridge not running)" >&2
+              exit 125
+            fi
+
+            AS_ROOT="false"
+            TIMEOUT_SEC="45"
+            while [ "${'$'}#" -gt 0 ]; do
+              case "${'$'}1" in
+                -r|--root)
+                  AS_ROOT="true"
+                  shift
+                  ;;
+                -t|--timeout)
+                  TIMEOUT_SEC="${'$'}2"
+                  shift 2
+                  ;;
+                -c)
+                  shift
+                  break
+                  ;;
+                --)
+                  shift
+                  break
+                  ;;
+                *)
+                  break
+                  ;;
+              esac
+            done
+
+            if [ "${'$'}#" -eq 0 ]; then
+              CMD="${'$'}(cat)"
+            else
+              CMD="${'$'}*"
+            fi
+
+            if [ -z "${'$'}CMD" ]; then
+              echo "Usage: host-sh [-r] [-t seconds] \"<android_command>\"" >&2
+              exit 2
+            fi
+
+            PORT="${'$'}(grep '^PORT=' "${'$'}ENDPOINT_FILE" | cut -d= -f2)"
+            TOKEN="${'$'}(grep '^TOKEN=' "${'$'}ENDPOINT_FILE" | cut -d= -f2)"
+
+            HDR_FILE="${'$'}(mktemp /tmp/hostsh_hdr.XXXXXX)"
+            cleanup() { rm -f "${'$'}HDR_FILE"; }
+            trap cleanup EXIT INT TERM
+
+            if command -v curl >/dev/null 2>&1; then
+              printf '%s' "${'$'}CMD" | curl -sS --max-time "${'$'}((TIMEOUT_SEC + 5))" \
+                -D "${'$'}HDR_FILE" \
+                -H "Expect:" \
+                -H "X-Bridge-Token: ${'$'}TOKEN" \
+                -H "X-As-Root: ${'$'}AS_ROOT" \
+                -H "X-Timeout-Sec: ${'$'}TIMEOUT_SEC" \
+                --data-binary @- \
+                "http://127.0.0.1:${'$'}PORT/exec"
+              RC=${'$'}?
+            else
+              echo "host-sh: curl is required inside Rootfs" >&2
+              exit 127
+            fi
+
+            if [ "${'$'}RC" -ne 0 ]; then
+              echo "host-sh: bridge request failed (curl exit ${'$'}RC)" >&2
+              exit 125
+            fi
+
+            STDERR_B64="${'$'}(awk 'BEGIN{IGNORECASE=1} /^X-Stderr-B64:/ {sub(/\r${'$'}/, ""); print ${'$'}2}' "${'$'}HDR_FILE")"
+            if [ -n "${'$'}STDERR_B64" ]; then
+              printf '%s' "${'$'}STDERR_B64" | base64 -d >&2 2>/dev/null
+            fi
+
+            EXIT_CODE="${'$'}(awk 'BEGIN{IGNORECASE=1} /^X-Exit-Code:/ {sub(/\r${'$'}/, ""); print ${'$'}2}' "${'$'}HDR_FILE")"
+            exit "${'$'}{EXIT_CODE:-1}"
+        """.trimIndent() + "\n"
+
+        private val RISH_WRAPPER_SCRIPT = """
+            #!/bin/sh
+            exec /usr/local/bin/host-sh "${'$'}@"
+        """.trimIndent() + "\n"
+
+        private val SAFE_RM_SCRIPT = """
+            #!/bin/sh
+            # Protect /sdcard files by moving them to /sdcard/.Trash-RikkaHub instead of permanent deletion
+            REAL_RM="/bin/rm"
+            [ -x "/usr/bin/rm" ] && [ ! -x "${'$'}REAL_RM" ] && REAL_RM="/usr/bin/rm"
+
+            TRASH_DIR="/sdcard/.Trash-RikkaHub"
+            HAS_SDCARD=0
+            for arg in "${'$'}@"; do
+              case "${'$'}arg" in
+                -*) ;;
+                *)
+                  RESOLVED="${'$'}(realpath -m "${'$'}arg" 2>/dev/null || echo "${'$'}arg")"
+                  case "${'$'}RESOLVED" in
+                    /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
+                      HAS_SDCARD=1
+                      ;;
+                  esac
+                  ;;
+              esac
+            done
+
+            if [ "${'$'}HAS_SDCARD" -eq 0 ]; then
+              exec "${'$'}REAL_RM" "${'$'}@"
+            fi
+
+            FORCE=0
+            STATUS=0
+            for arg in "${'$'}@"; do
+              case "${'$'}arg" in
+                -*f*) FORCE=1 ;;
+                -*) ;;
+                *)
+                  RESOLVED="${'$'}(realpath -m "${'$'}arg" 2>/dev/null || echo "${'$'}arg")"
+                  case "${'$'}RESOLVED" in
+                    /sdcard|/storage/emulated/0)
+                      echo "rm: refusing to remove root storage directory '${'$'}arg'" >&2
+                      STATUS=1
+                      ;;
+                    /sdcard/.Trash-RikkaHub|/sdcard/.Trash-RikkaHub/*|/storage/emulated/0/.Trash-RikkaHub|/storage/emulated/0/.Trash-RikkaHub/*)
+                      echo "rm: refusing to permanently delete files inside '${'$'}TRASH_DIR'" >&2
+                      STATUS=1
+                      ;;
+                    /sdcard/*|/storage/emulated/0/*)
+                      if [ -e "${'$'}arg" ] || [ -L "${'$'}arg" ]; then
+                        mkdir -p "${'$'}TRASH_DIR"
+                        BASE="${'$'}(basename "${'$'}arg")"
+                        TS="${'$'}(date +%s)_${'$'}${'$'}"
+                        mv -- "${'$'}arg" "${'$'}TRASH_DIR/${'$'}{TS}_${'$'}{BASE}" || STATUS=1
+                      elif [ "${'$'}FORCE" -eq 0 ]; then
+                        echo "rm: cannot remove '${'$'}arg': No such file or directory" >&2
+                        STATUS=1
+                      fi
+                      ;;
+                    *)
+                      if [ "${'$'}FORCE" -eq 1 ]; then
+                        "${'$'}REAL_RM" -rf -- "${'$'}arg" || STATUS=1
+                      else
+                        "${'$'}REAL_RM" -r -- "${'$'}arg" || STATUS=1
+                      fi
+                      ;;
+                  esac
+                  ;;
+              esac
+            done
+            exit "${'$'}STATUS"
+        """.trimIndent() + "\n"
+
+        private val SAFE_RMDIR_SCRIPT = """
+            #!/bin/sh
+            for arg in "${'$'}@"; do
+              case "${'$'}arg" in
+                -*) ;;
+                *)
+                  RESOLVED="${'$'}(realpath -m "${'$'}arg" 2>/dev/null || echo "${'$'}arg")"
+                  case "${'$'}RESOLVED" in
+                    /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
+                      exec /usr/local/bin/rm "${'$'}@"
+                      ;;
+                  esac
+                  ;;
+              esac
+            done
+            exec /bin/rmdir "${'$'}@"
+        """.trimIndent() + "\n"
+
+        private val SAFE_UNLINK_SCRIPT = """
+            #!/bin/sh
+            if [ "${'$'}#" -eq 1 ]; then
+              RESOLVED="${'$'}(realpath -m "${'$'}1" 2>/dev/null || echo "${'$'}1")"
+              case "${'$'}RESOLVED" in
+                /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
+                  exec /usr/local/bin/rm -- "${'$'}1"
+                  ;;
+              esac
+            fi
+            exec /usr/bin/unlink "${'$'}@"
+        """.trimIndent() + "\n"
     }
 }
 

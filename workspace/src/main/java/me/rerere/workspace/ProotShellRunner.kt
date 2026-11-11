@@ -82,7 +82,7 @@ class ProotShellRunner(
     override fun terminalLaunch(context: WorkspaceTerminalContext): WorkspaceTerminalLaunch {
         val shell = WorkspaceManager.rootfsShell(context.linuxDir)
         val args = prootArgs(context.linuxDir, context.filesDir, WORKSPACE_DIR, context.bindMounts)
-        args += ROOTFS_ENV
+        args += buildRootfsEnv(context.linuxDir, context.bindMounts)
         args += listOf(
             "USER=root",
             "SHELL=$shell",
@@ -113,7 +113,7 @@ class ProotShellRunner(
     ): List<String> {
         val command = mutableListOf(File(nativeLibraryDir, PROOT_EXEC).absolutePath)
         command += prootArgs(context.linuxDir, context.filesDir, context.prootCwd(), context.bindMounts)
-        command += ROOTFS_ENV
+        command += buildRootfsEnv(context.linuxDir, context.bindMounts)
         command += listOf(
             // 非交互执行约定, 抑制各类 CLI 的交互行为 (确认提示/分页器/颜色转义)
             "CI=true",
@@ -129,6 +129,38 @@ class ProotShellRunner(
         )
         command += extraArgs
         return command
+    }
+
+    /**
+     * 若当前 Rootfs 为 glibc (Ubuntu/Debian) 且宿主机桥接目录中存在匹配的 libsafesdcard.so，
+     * 注入 LD_PRELOAD 以在系统调用层拦截 Python/Node/C 对 /sdcard 文件的直接 unlink 删除。
+     */
+    private fun buildRootfsEnv(linuxDir: File, bindMounts: List<WorkspaceBindMount>): List<String> {
+        val preload = resolveSafeSdcardPreload(linuxDir, bindMounts)
+        return if (preload != null) {
+            ROOTFS_ENV + "LD_PRELOAD=$preload"
+        } else {
+            ROOTFS_ENV
+        }
+    }
+
+    private fun resolveSafeSdcardPreload(linuxDir: File, bindMounts: List<WorkspaceBindMount>): String? {
+        val bridgeMount = bindMounts.firstOrNull { it.target.trimEnd('/') == "/run/host_bridge" } ?: return null
+        return when {
+            (File(linuxDir, "lib/aarch64-linux-gnu/libc.so.6").exists() ||
+                File(linuxDir, "usr/lib/aarch64-linux-gnu/libc.so.6").exists()) &&
+                File(bridgeMount.source, "libsafesdcard_arm64.so").isFile -> {
+                "/run/host_bridge/libsafesdcard_arm64.so"
+            }
+
+            (File(linuxDir, "lib/x86_64-linux-gnu/libc.so.6").exists() ||
+                File(linuxDir, "usr/lib/x86_64-linux-gnu/libc.so.6").exists()) &&
+                File(bridgeMount.source, "libsafesdcard_x86_64.so").isFile -> {
+                "/run/host_bridge/libsafesdcard_x86_64.so"
+            }
+
+            else -> null
+        }
     }
 
     /** PRoot 自身的参数: Rootfs、工作目录与挂载表, 命令执行和交互式终端共用 */
@@ -151,7 +183,7 @@ class ProotShellRunner(
         )
 
         bindMounts.forEach { mount ->
-            if (mount.source.exists()) {
+            if (mount.source.exists() && mount.source.canRead()) {
                 args += "-b"
                 args += "${mount.source.absolutePath}:${mount.target.trimEnd('/')}"
             }

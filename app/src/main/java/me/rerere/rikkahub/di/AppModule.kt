@@ -9,12 +9,16 @@ import me.rerere.rikkahub.data.ai.ChatRequestFactory
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
+import me.rerere.rikkahub.phoneuse.RootPhoneController
 import me.rerere.rikkahub.service.BackgroundShellManager
 import me.rerere.rikkahub.service.ChatFloatingTracker
 import me.rerere.rikkahub.service.ChatNotificationManager
 import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.HostBridgeDaemon
 import me.rerere.rikkahub.service.MediaCreationService
+import java.io.File
 import me.rerere.rikkahub.ui.floating.ChatFloatingWindows
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalSessionManager
 import me.rerere.rikkahub.utils.EmojiData
@@ -38,7 +42,26 @@ val appModule = module {
     }
 
     single {
-        LocalTools(get(), get(), get(), get(), get(), get())
+        HostShellExecutor()
+    }
+
+    single {
+        RootPhoneController(
+            context = get(),
+            executor = get(),
+        )
+    }
+
+    single {
+        val context: android.content.Context = get()
+        HostBridgeDaemon(
+            bridgeDir = File(context.filesDir, "host_bridge"),
+            executor = get(),
+        )
+    }
+
+    single {
+        LocalTools(get(), get(), get(), get(), get(), get(), get(), get())
     }
 
     single {

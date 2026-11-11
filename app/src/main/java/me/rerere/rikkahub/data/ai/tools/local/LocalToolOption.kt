@@ -40,4 +40,8 @@ sealed class LocalToolOption {
     @Serializable
     @SerialName("phone_use")
     data object PhoneUse : LocalToolOption()
+
+    @Serializable
+    @SerialName("android_shell")
+    data object AndroidShell : LocalToolOption()
 }

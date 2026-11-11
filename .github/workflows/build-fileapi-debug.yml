@@ -80,10 +80,18 @@ jobs:
           }
           JSON
 
-      - name: Build release + debug (arm64)
+      - name: Build libsafesdcard.so for PRoot /sdcard trash protection
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p app/src/main/assets/safesdcard
+          aarch64-linux-gnu-gcc -shared -fPIC -O2 workspace/safesdcard/safesdcard.c -o app/src/main/assets/safesdcard/libsafesdcard_arm64.so -ldl
+          gcc -shared -fPIC -O2 workspace/safesdcard/safesdcard.c -o app/src/main/assets/safesdcard/libsafesdcard_x86_64.so -ldl
+          ls -lh app/src/main/assets/safesdcard
+
+      - name: Run unit tests & build release + debug (arm64)
         run: |
           chmod +x gradlew
-          ./gradlew assembleGithubRelease assembleGithubDebug --no-daemon
+          ./gradlew :workspace:testDebugUnitTest :app:testGithubDebugUnitTest assembleGithubRelease assembleGithubDebug --no-daemon
 
       - name: Collect arm64 APKs
         run: |

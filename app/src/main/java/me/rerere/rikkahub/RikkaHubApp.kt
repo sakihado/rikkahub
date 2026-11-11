@@ -38,6 +38,10 @@ import me.rerere.rikkahub.di.appModule
 import me.rerere.rikkahub.di.dataSourceModule
 import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
+import me.rerere.rikkahub.phoneuse.HostShellExecutor
+import me.rerere.rikkahub.phoneuse.PhoneUseManager
+import me.rerere.rikkahub.phoneuse.RootPhoneController
+import me.rerere.rikkahub.service.HostBridgeDaemon
 import me.rerere.rikkahub.service.MediaCreationService
 import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.utils.CrashHandler
@@ -105,6 +109,9 @@ class RikkaHubApp : Application() {
 
         // Extract builtin skills from assets after install/update
         extractBuiltinSkills()
+
+        // Start host bridge daemon & initialize Root controller if available
+        initHostBridgeAndRoot()
 
         // Load models.dev data for model capability matching, then refresh it in background
         updateModelsDev()
@@ -202,6 +209,38 @@ class RikkaHubApp : Application() {
     private fun extractBuiltinSkills() {
         get<AppScope>().launch(Dispatchers.IO) {
             get<SkillManager>().ensureBuiltinSkillsExtracted()
+        }
+    }
+
+    private fun initHostBridgeAndRoot() {
+        if (BuildConfig.IS_PLAY_STORE) return
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                val bridgeDir = File(filesDir, "host_bridge").apply { mkdirs() }
+                // 提取预编译的 PRoot /sdcard 防误删保护库（由 CI 编译打包在 assets/safesdcard 下）
+                listOf("libsafesdcard_arm64.so", "libsafesdcard_x86_64.so").forEach { name ->
+                    runCatching {
+                        assets.open("safesdcard/$name").use { input ->
+                            val outFile = File(bridgeDir, name)
+                            outFile.outputStream().use { out -> input.copyTo(out) }
+                            outFile.setReadable(true, false)
+                            outFile.setExecutable(true, false)
+                        }
+                    }
+                }
+                get<HostBridgeDaemon>().start()
+
+                val executor = get<HostShellExecutor>()
+                if (executor.hasSuBinaryOnDevice() && executor.probeRootAccess()) {
+                    executor.ensureStorageAccessViaRoot(packageName)
+                    if (PhoneUseManager.isSupported) {
+                        get<PhoneUseManager>().attachRoot(get<RootPhoneController>())
+                    }
+                    Log.i(TAG, "Root/Shell engine attached for PhoneUse & HostBridge")
+                }
+            }.onFailure {
+                Log.w(TAG, "initHostBridgeAndRoot failed", it)
+            }
         }
     }
 
@@ -306,6 +345,7 @@ class RikkaHubApp : Application() {
 
     override fun onTerminate() {
         super.onTerminate()
+        runCatching { get<HostBridgeDaemon>().stop() }
         get<AppScope>().cancel()
         stopService(Intent(this, WebServerService::class.java))
     }

@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
@@ -29,21 +30,27 @@ private const val TAP_SLOP_DP = 8f
 
 /**
  * 在屏幕上画出 AI 这次点在哪、往哪滑，让用户看得出它在操作。
- * 用无障碍服务自己的覆盖层，不需要悬浮窗权限；窗口不接收触摸，只在动画期间存在。
- * 所有方法都要在主线程调用。
+ * - 无障碍模式下使用 `TYPE_ACCESSIBILITY_OVERLAY`
+ * - Root / Shell 模式下复用已开启的悬浮窗权限 (`TYPE_APPLICATION_OVERLAY`)
+ * 窗口不接收触摸，只在动画期间存在。所有方法都要在主线程调用。
  */
-class GestureIndicator(private val service: AccessibilityService) {
-    private val windowManager = service.getSystemService(WindowManager::class.java)
+class GestureIndicator(private val context: Context) {
+    private val windowManager = context.getSystemService(WindowManager::class.java)
     private var view: IndicatorView? = null
 
     /** 坐标是屏幕像素；[durationMs] 是手势本身的时长，滑动的轨迹跟着手势一起前进 */
     fun show(fromX: Float, fromY: Float, toX: Float, toY: Float, durationMs: Long) {
         dismiss()
-        val view = IndicatorView(service, fromX, fromY, toX, toY, durationMs, onEnd = ::dismiss)
+        val windowType = when {
+            context is AccessibilityService -> WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            Settings.canDrawOverlays(context) -> WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else -> return
+        }
+        val view = IndicatorView(context, fromX, fromY, toX, toY, durationMs, onEnd = ::dismiss)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            windowType,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or

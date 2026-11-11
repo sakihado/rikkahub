@@ -233,6 +233,12 @@ private fun buildWorkspacePrompt(
     appendLine(
         "- Files the user uploaded are mounted at `/upload`. Treat `/upload` as READ-ONLY: read uploaded files from `/upload/<file-name>`, but never modify, overwrite, or delete anything there. If you need to change an uploaded file, copy it into `/workspace` first and edit the copy."
     )
+    appendLine(
+        "- The device's shared external storage is mounted at `/sdcard` (with `/sdcard/Download/RikkaHub` pre-authorized for exporting build artifacts or files to the user). Deletion calls (`rm`, `unlink`, `os.remove`) on `/sdcard` are automatically intercepted and moved to `/sdcard/.Trash-RikkaHub` to prevent accidental data loss."
+    )
+    appendLine(
+        "- Android Host Bridge (`host-sh`): Inside `workspace_shell`, run `host-sh \"<android_readonly_cmd>\"` to execute read-only Android host commands (UID 2000 shell: `dumpsys`, `logcat -d`, `getprop`, `pm list/path/dump`, `settings get/list`, `screencap -p`, `uiautomator dump /proc/self/fd/1`) and pipe their raw output directly into Linux tools (`python3`, `jq`, `sqlite3`, `awk`, `grep`). State-changing or `root` host commands require interactive user approval and must be called via the `android_shell` tool instead of `host-sh`."
+    )
     if (!cwd.isNullOrBlank()) {
         appendLine(
             "- Current working directory: `$cwd`. Use this as the default context for file operations and shell commands."

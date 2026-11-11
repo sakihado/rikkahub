@@ -2,12 +2,17 @@ package me.rerere.rikkahub.data.ai.tools.local
 
 import android.content.Context
 import me.rerere.ai.core.Tool
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
+import me.rerere.rikkahub.phoneuse.RootPhoneController
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
 import me.rerere.tts.provider.TTSManager
+import java.io.File
 
 class LocalTools(
     private val context: Context,
@@ -16,6 +21,8 @@ class LocalTools(
     private val settingsStore: SettingsStore,
     private val phoneUseManager: PhoneUseManager,
     private val filesManager: FilesManager,
+    private val hostShellExecutor: HostShellExecutor,
+    private val rootPhoneController: RootPhoneController,
 ) {
     val javascriptTool by lazy { buildJavascriptTool() }
 
@@ -40,6 +47,11 @@ class LocalTools(
             ownPackageName = context.packageName,
             manager = phoneUseManager,
             isFloatingWindowOn = { isFloatingChatWindowOn(context, settingsStore.settingsFlow.value) },
+            ensureControllerReady = {
+                if (hostShellExecutor.probeRootAccess()) {
+                    phoneUseManager.attachRoot(rootPhoneController)
+                }
+            },
             saveScreenshot = { bytes ->
                 filesManager.createChatFilesByByteArrays(
                     byteArrays = listOf(bytes),
@@ -47,6 +59,13 @@ class LocalTools(
                     mimeType = "image/jpeg",
                 ).first().toString()
             },
+        )
+    }
+
+    val androidShellTool by lazy {
+        buildAndroidShellTool(
+            executor = hostShellExecutor,
+            toolOutputsDir = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
         )
     }
 
@@ -80,6 +99,9 @@ class LocalTools(
         // 不支持的渠道和系统版本上，之前在别处开过（比如导入的备份）也不提供
         if (options.contains(LocalToolOption.PhoneUse) && PhoneUseManager.isSupported) {
             tools.add(phoneUseTool)
+        }
+        if (options.contains(LocalToolOption.AndroidShell) && !BuildConfig.IS_PLAY_STORE) {
+            tools.add(androidShellTool)
         }
         return tools
     }

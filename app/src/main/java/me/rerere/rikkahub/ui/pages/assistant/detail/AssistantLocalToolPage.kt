@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -24,23 +25,28 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import me.rerere.ui.toast.ToastType
+import kotlinx.coroutines.launch
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Calendar03
 import me.rerere.hugeicons.stroke.ChartLineData01
 import me.rerere.hugeicons.stroke.ClipboardPaste
 import me.rerere.hugeicons.stroke.Clock01
+import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.hugeicons.stroke.JavaScript
 import me.rerere.hugeicons.stroke.MessageQuestion
 import me.rerere.hugeicons.stroke.SmartPhone01
 import me.rerere.hugeicons.stroke.Tap01
 import me.rerere.hugeicons.stroke.VolumeHigh
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
-import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
+import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.phoneuse.HostPrivilegeState
+import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
+import me.rerere.rikkahub.phoneuse.RootPhoneController
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
@@ -56,6 +62,8 @@ import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.utils.hasUsageStatsPermission
 import me.rerere.rikkahub.utils.openAccessibilitySettings
 import me.rerere.rikkahub.utils.openUsageAccessSettings
+import me.rerere.ui.richtext.DiffAddedColor
+import me.rerere.ui.toast.ToastType
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
@@ -101,16 +109,24 @@ private fun AssistantLocalToolContent(
     onUpdate: (Assistant) -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
     val navController = LocalNavController.current
     val settingsStore: SettingsStore = koinInject()
     val phoneUseManager: PhoneUseManager = koinInject()
+    val hostShellExecutor: HostShellExecutor = koinInject()
+    val rootPhoneController: RootPhoneController = koinInject()
+
     val phoneUseServiceOn = phoneUseManager.controller.collectAsStateWithLifecycle().value != null
+    val isRootBacked by phoneUseManager.isRootBacked.collectAsStateWithLifecycle()
+    val privilegeState by hostShellExecutor.privilegeState.collectAsStateWithLifecycle()
+
     val permissionRequiredText =
         stringResource(R.string.assistant_page_local_tools_screen_time_permission_required)
     val floatingWindowRequiredText =
         stringResource(R.string.assistant_page_local_tools_phone_use_floating_window_required)
     val enableServiceText = stringResource(R.string.assistant_page_local_tools_phone_use_enable_service)
+    val rootReadyToastText = stringResource(R.string.assistant_page_local_tools_phone_use_root_ready)
 
     val calendarPermissionState = rememberPermissionState(
         permissions = setOf(
@@ -139,10 +155,30 @@ private fun AssistantLocalToolContent(
             navController.navigate(Screen.SettingPreferencesNotification)
             return
         }
-        // 无障碍服务还没开时带用户去系统设置，开关照常打开，开完服务就能用
         if (enabled && option == LocalToolOption.PhoneUse && !phoneUseServiceOn) {
-            toaster.show(message = enableServiceText, type = ToastType.Warning)
-            context.openAccessibilitySettings()
+            scope.launch {
+                val rooted = hostShellExecutor.probeRootAccess(forceRefresh = true)
+                if (rooted) {
+                    hostShellExecutor.ensureStorageAccessViaRoot(context.packageName)
+                    phoneUseManager.attachRoot(rootPhoneController)
+                    toaster.show(message = rootReadyToastText, type = ToastType.Success)
+                } else if (phoneUseManager.controller.value == null) {
+                    // 无 Root 权限且无障碍服务还没开时，才回退引导去系统无障碍设置
+                    toaster.show(message = enableServiceText, type = ToastType.Warning)
+                    context.openAccessibilitySettings()
+                }
+            }
+        }
+        if (enabled && option == LocalToolOption.AndroidShell) {
+            scope.launch {
+                val rooted = hostShellExecutor.probeRootAccess(forceRefresh = true)
+                if (rooted) {
+                    hostShellExecutor.ensureStorageAccessViaRoot(context.packageName)
+                    if (PhoneUseManager.isSupported) {
+                        phoneUseManager.attachRoot(rootPhoneController)
+                    }
+                }
+            }
         }
         if (enabled && option == LocalToolOption.ScreenTime && !context.hasUsageStatsPermission()) {
             toaster.show(message = permissionRequiredText, type = ToastType.Warning)
@@ -153,7 +189,7 @@ private fun AssistantLocalToolContent(
             return
         }
         val newLocalTools = if (enabled) {
-            assistant.localTools + option
+            (assistant.localTools + option).distinct()
         } else {
             assistant.localTools - option
         }
@@ -271,12 +307,41 @@ private fun AssistantLocalToolContent(
                     description = {
                         Column {
                             Text(stringResource(R.string.assistant_page_local_tools_phone_use_desc))
-                            // 开了工具但服务没开时模型调用会直接报错，在这里说明原因
-                            if (LocalToolOption.PhoneUse in assistant.localTools && !phoneUseServiceOn) {
+                            if (isRootBacked) {
+                                Text(
+                                    text = stringResource(R.string.assistant_page_local_tools_phone_use_root_active),
+                                    color = DiffAddedColor,
+                                )
+                            } else if (LocalToolOption.PhoneUse in assistant.localTools && !phoneUseServiceOn) {
                                 Text(
                                     text = stringResource(R.string.assistant_page_local_tools_phone_use_service_off),
                                     color = MaterialTheme.colorScheme.error,
                                 )
+                            }
+                        }
+                    },
+                )
+            }
+            if (!BuildConfig.IS_PLAY_STORE) {
+                toolItem(
+                    option = LocalToolOption.AndroidShell,
+                    icon = HugeIcons.ComputerTerminal01,
+                    title = { Text(stringResource(R.string.assistant_page_local_tools_android_shell_title)) },
+                    description = {
+                        Column {
+                            Text(stringResource(R.string.assistant_page_local_tools_android_shell_desc))
+                            when (privilegeState) {
+                                HostPrivilegeState.ROOT_GRANTED -> Text(
+                                    text = stringResource(R.string.assistant_page_local_tools_android_shell_status_root),
+                                    color = DiffAddedColor,
+                                )
+                                HostPrivilegeState.UNPRIVILEGED -> if (LocalToolOption.AndroidShell in assistant.localTools) {
+                                    Text(
+                                        text = stringResource(R.string.assistant_page_local_tools_android_shell_status_unprivileged),
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                    )
+                                }
+                                HostPrivilegeState.UNKNOWN -> Unit
                             }
                         }
                     },

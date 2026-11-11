@@ -45,7 +45,7 @@ enum class PhoneKey { BACK, HOME, RECENTS, NOTIFICATIONS, ENTER }
 
 /**
  * 操作手机的底层能力，坐标都是屏幕像素。
- * 实现是 github 渠道的无障碍服务，用户在系统设置里开启后才存在；Play 版没有实现。
+ * 优先使用 Root / Shell 控制器（无需开启系统无障碍服务，免风控检测），未取得特权时回退无障碍服务。
  */
 interface PhoneController {
     /**
@@ -71,6 +71,15 @@ interface PhoneController {
     fun listApps(): List<PhoneApp>
 
     fun openApp(packageName: String): Boolean
+
+    /** 免截图获取顶层 Activity / Intent / Fragment 详情（Root/Shell 后端支持） */
+    suspend fun dumpTopActivity(): String? = null
+
+    /** 免下拉读取当前状态栏活动通知（Root/Shell 后端支持） */
+    suspend fun readNotifications(): String? = null
+
+    /** 通过 DeepLink / Intent URI 直接跳转页面，解析后的目标包名为空或被拒时返回 false */
+    suspend fun openUri(uri: String, blockedPackages: Set<String>, ownPackageName: String): Boolean = false
 }
 
 /**
@@ -80,28 +89,63 @@ interface PhoneController {
 fun isFloatingChatWindowOn(context: Context, settings: Settings): Boolean =
     settings.displaySetting.enableFloatingChatWindow && android.provider.Settings.canDrawOverlays(context)
 
-/** 无障碍服务连接后把自己登记在这里，工具和设置页从这里拿 */
+/**
+ * 管理当前活跃的 [PhoneController]。
+ * 当设备具备 Root / Sui 权限时，[rootController] 始终优先于无障碍服务，避免用户开启系统无障碍。
+ */
 class PhoneUseManager {
     companion object {
-        /** Play 版没有无障碍服务；截图和回车键是 Android 11 才有的接口，更低的版本不提供 */
         val isSupported: Boolean
             get() = !BuildConfig.IS_PLAY_STORE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     }
 
+    private var rootController: PhoneController? = null
+    private var accessibilityController: PhoneController? = null
+
     private val _controller = MutableStateFlow<PhoneController?>(null)
     val controller: StateFlow<PhoneController?> = _controller.asStateFlow()
+
+    private val _isRootBacked = MutableStateFlow(false)
+    val isRootBacked: StateFlow<Boolean> = _isRootBacked.asStateFlow()
 
     private val _acting = MutableStateFlow(false)
 
     /** 正在截图或执行手势，这期间悬浮窗要让出屏幕：不能出现在截图里，也不能挡住点击 */
     val acting: StateFlow<Boolean> = _acting.asStateFlow()
 
-    fun attach(controller: PhoneController) {
-        _controller.value = controller
+    @Synchronized
+    fun attachRoot(controller: PhoneController) {
+        rootController = controller
+        refreshActive()
     }
 
+    @Synchronized
+    fun detachRoot() {
+        rootController = null
+        refreshActive()
+    }
+
+    @Synchronized
+    fun attach(controller: PhoneController) {
+        accessibilityController = controller
+        refreshActive()
+    }
+
+    @Synchronized
     fun detach(controller: PhoneController) {
-        _controller.compareAndSet(controller, null)
+        if (accessibilityController === controller) {
+            accessibilityController = null
+        }
+        if (rootController === controller) {
+            rootController = null
+        }
+        refreshActive()
+    }
+
+    private fun refreshActive() {
+        val active = rootController ?: accessibilityController
+        _controller.value = active
+        _isRootBacked.value = rootController != null
     }
 
     fun setActing(acting: Boolean) {

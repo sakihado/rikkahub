@@ -96,6 +96,14 @@ object PhoneUseToolUI : ToolUIRenderer {
                 ?.let { stringResource(R.string.chat_message_tool_phone_use_open_app_name, it) }
                 ?: stringResource(R.string.chat_message_tool_phone_use_open_app)
 
+            "open_uri" -> args.getStringContent("uri")
+                ?.let { if (it.length > TEXT_MAX_CHARS) it.take(TEXT_MAX_CHARS) + "…" else it }
+                ?.let { stringResource(R.string.chat_message_tool_phone_use_open_uri_target, it) }
+                ?: stringResource(R.string.chat_message_tool_phone_use_open_uri)
+
+            "dump_activity" -> stringResource(R.string.chat_message_tool_phone_use_dump_activity)
+            "notifications" -> stringResource(R.string.chat_message_tool_phone_use_notifications)
+
             "list_apps" -> stringResource(R.string.chat_message_tool_phone_use_list_apps)
             // 不传 seconds 时工具等 2 秒
             "wait" -> stringResource(
