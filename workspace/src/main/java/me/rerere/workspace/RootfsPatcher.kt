@@ -468,13 +468,15 @@ class RootfsPatcher {
               exec "${'$'}REAL_RM" "${'$'}@"
             fi
 
-            # Re-collect option tokens cleanly into $@ before iterating targets
+            # Position-independent argument partitioning:
+            # 1) Collect all option flags anywhere before `--` (supporting trailing options like `rm /sdcard/a /ws/dir -rf`)
+            # 2) Append `--`
+            # 3) Dispatch `/sdcard` targets to trash helper and append non-`/sdcard` targets after `--`
             ORIG_COUNT=${'$'}#
             END_OPTS=0
-            IDX=0
-            while [ "${'$'}IDX" -lt "${'$'}ORIG_COUNT" ]; do
-              arg="${'$'}1"
-              shift
+            IDX=1
+            while [ "${'$'}IDX" -le "${'$'}ORIG_COUNT" ]; do
+              eval "arg=\${'$'}{${'$'}IDX}"
               IDX=${'$'}((IDX + 1))
               if [ "${'$'}END_OPTS" -eq 0 ]; then
                 case "${'$'}arg" in
@@ -482,79 +484,35 @@ class RootfsPatcher {
                   -?*) set -- "${'$'}@" "${'$'}arg"; continue ;;
                 esac
               fi
-              set -- "${'$'}@" "__TARGET__:${'$'}arg"
             done
 
-            # Extract options vs targets using positional parameters safely (supports spaces/newlines)
+            set -- "${'$'}@" "--"
+
             STATUS=0
-            TOTAL=${'$'}#
-            # Count how many leading option args we kept
-            OPT_COUNT=0
-            for item in "${'$'}@"; do
-              case "${'$'}item" in
-                __TARGET__:*) break ;;
-                *) OPT_COUNT=${'$'}((OPT_COUNT + 1)) ;;
-              esac
-            done
-
-            I=0
-            while [ "${'$'}I" -lt "${'$'}TOTAL" ]; do
-              item="${'$'}1"
-              shift
-              I=${'$'}((I + 1))
-              case "${'$'}item" in
-                __TARGET__:*)
-                  target="${'$'}{item#__TARGET__:}"
-                  RES="${'$'}(resolve_target "${'$'}target")"
-                  if is_sdcard "${'$'}RES"; then
-                    "${'$'}HELPER" "rm" "rm" "${'$'}FORCE" "${'$'}RECURSIVE" "${'$'}DIR_FLAG" "${'$'}target" "${'$'}RES" || STATUS=1
-                  else
-                    # Keep non-sdcard target in positional queue so REAL_RM runs once with exact original flags
-                    set -- "${'$'}@" "${'$'}item"
-                  fi
-                  ;;
-                *)
-                  set -- "${'$'}@" "${'$'}item"
-                  ;;
-              esac
-            done
-
-            # Any remaining __TARGET__:* items in $@ are non-/sdcard paths; invoke REAL_RM once with exact original flags!
             NON_SD_COUNT=0
-            ROT=${'$'}#
-            J=0
-            while [ "${'$'}J" -lt "${'$'}ROT" ]; do
-              cur="${'$'}1"
-              shift
-              J=${'$'}((J + 1))
-              case "${'$'}cur" in
-                __TARGET__:*)
-                  NON_SD_COUNT=${'$'}((NON_SD_COUNT + 1))
-                  ;;
-              esac
-              set -- "${'$'}@" "${'$'}cur"
+            END_OPTS=0
+            IDX=1
+            while [ "${'$'}IDX" -le "${'$'}ORIG_COUNT" ]; do
+              eval "arg=\${'$'}{${'$'}IDX}"
+              IDX=${'$'}((IDX + 1))
+              if [ "${'$'}END_OPTS" -eq 0 ]; then
+                case "${'$'}arg" in
+                  --) END_OPTS=1; continue ;;
+                  -?*) continue ;;
+                esac
+              fi
+              RES="${'$'}(resolve_target "${'$'}arg")"
+              if is_sdcard "${'$'}RES"; then
+                "${'$'}HELPER" "rm" "rm" "${'$'}FORCE" "${'$'}RECURSIVE" "${'$'}DIR_FLAG" "${'$'}arg" "${'$'}RES" || STATUS=1
+              else
+                set -- "${'$'}@" "${'$'}arg"
+                NON_SD_COUNT=${'$'}((NON_SD_COUNT + 1))
+              fi
             done
+
+            shift "${'$'}ORIG_COUNT"
 
             if [ "${'$'}NON_SD_COUNT" -gt 0 ]; then
-              # Put options first, then --, then stripped non-sdcard targets
-              FINAL_TOTAL=${'$'}#
-              K=0
-              while [ "${'$'}K" -lt "${'$'}OPT_COUNT" ]; do
-                opt_item="${'$'}1"
-                shift
-                set -- "${'$'}@" "${'$'}opt_item"
-                K=${'$'}((K + 1))
-              done
-              set -- "${'$'}@" "--"
-              REM=${'$'}((FINAL_TOTAL - OPT_COUNT))
-              K=0
-              while [ "${'$'}K" -lt "${'$'}REM" ]; do
-                tgt_item="${'$'}1"
-                shift
-                set -- "${'$'}@" "${'$'}{tgt_item#__TARGET__:}"
-                K=${'$'}((K + 1))
-              done
-              # Shift off the old prefix so $@ has ONLY: <orig_opts...> -- <non_sdcard_targets...>
               "${'$'}REAL_RM" "${'$'}@" || STATUS=${'$'}?
             fi
 

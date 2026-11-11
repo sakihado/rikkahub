@@ -3,6 +3,8 @@ package me.rerere.rikkahub.phoneuse
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runInterruptible
@@ -18,6 +20,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "HostShellExecutor"
 
@@ -359,9 +362,9 @@ class HostShellExecutor(
         keepStdinAsLifeline: Boolean,
         timeoutMs: Long,
         maxStdoutBytes: Int,
-    ): HostShellResult = runInterruptible(Dispatchers.IO) {
+    ): HostShellResult = withContext(Dispatchers.IO) {
         val binder = Shizuku.getBinder()
-            ?: return@runInterruptible HostShellResult(
+            ?: return@withContext HostShellResult(
                 exitCode = 127,
                 stdoutBytes = ByteArray(0),
                 stderrBytes = "Shizuku/Sui binder disconnected".toByteArray(Charsets.UTF_8),
@@ -370,7 +373,7 @@ class HostShellExecutor(
         val remote: IRemoteProcess = try {
             IShizukuService.Stub.asInterface(binder).newProcess(cmdArgs, null, null)
         } catch (e: Throwable) {
-            return@runInterruptible HostShellResult(
+            return@withContext HostShellResult(
                 exitCode = 127,
                 stdoutBytes = ByteArray(0),
                 stderrBytes = (e.message ?: "IShizukuService.newProcess failed").toByteArray(Charsets.UTF_8),
@@ -397,26 +400,89 @@ class HostShellExecutor(
             remote.errorStream?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
         }.getOrNull() ?: InputStream.nullInputStream()
 
+        awaitBlockingRemoteProcess(
+            lifelineHandle = lifelineHandle,
+            stdoutStream = stdoutStream,
+            stderrStream = stderrStream,
+            timeoutMs = timeoutMs,
+            maxStdoutBytes = maxStdoutBytes,
+            waitForTimeout = { ms -> remote.waitForTimeout(ms, TimeUnit.MILLISECONDS.name) },
+            exitValue = { remote.exitValue() },
+            destroyRemote = { remote.destroy() },
+        )
+    }
+
+    /**
+     * 将「取消控制流（关闭本地 lifeline 管道 + 后台异步销毁）」与「同步阻塞 Binder 等待 (`waitForTimeout`)」彻底解耦：
+     * 即使内核 Binder `ioctl` 完全不响应 `Thread.interrupt()`，协程一旦取消（用户点击停止），
+     * `deferred.await()` 也会在毫秒级立即抛出 [CancellationException] 并当场关闭本地 [lifelineHandle]，
+     * 唤醒远端 `libshelldrop` 瞬间 `kill(-child_pgid, SIGKILL)`，绝不卡在同步 Binder 等待后面。
+     */
+    internal suspend fun awaitBlockingRemoteProcess(
+        lifelineHandle: Closeable?,
+        stdoutStream: InputStream,
+        stderrStream: InputStream,
+        timeoutMs: Long,
+        maxStdoutBytes: Int,
+        waitForTimeout: (Long) -> Boolean,
+        exitValue: () -> Int,
+        destroyRemote: () -> Unit,
+    ): HostShellResult {
         val stdoutCollector = ByteStreamCollector(stdoutStream, maxStdoutBytes)
         val stderrCollector = ByteStreamCollector(stderrStream, MAX_STDERR_BYTES)
+        val abortedOnce = AtomicBoolean(false)
 
-        fun abortRemoteTree() {
-            // 先断开 lifeline 管道，唤醒远端 libshelldrop 立即执行 kill(-child_pgid, SIGKILL)
+        fun abortNow(asyncDestroy: Boolean) {
+            if (!abortedOnce.compareAndSet(false, true)) return
+            // 本地管道写端 close() 永不阻塞在远端 Binder 上，毫秒级触发远端 POLLHUP / EOF
             runCatching { lifelineHandle?.close() }
-            runCatching { remote.waitForTimeout(150L, TimeUnit.MILLISECONDS.name) }
-            runCatching { remote.destroy() }
+            if (asyncDestroy) {
+                Thread {
+                    runCatching { waitForTimeout(120L) }
+                    runCatching { destroyRemote() }
+                    runCatching { stdoutStream.close() }
+                    runCatching { stderrStream.close() }
+                }.apply {
+                    isDaemon = true
+                    name = "rikkahub-remote-abort"
+                    start()
+                }
+            } else {
+                runCatching { waitForTimeout(150L) }
+                runCatching { destroyRemote() }
+            }
         }
 
-        try {
-            val finished = remote.waitForTimeout(timeoutMs, TimeUnit.MILLISECONDS.name)
+        val waitResult = CompletableDeferred<Result<Boolean>>()
+        Thread {
+            val outcome = runCatching { waitForTimeout(timeoutMs) }
+            waitResult.complete(outcome)
+        }.apply {
+            isDaemon = true
+            name = "rikkahub-binder-wait"
+            start()
+        }
+
+        return try {
+            val outcome = waitResult.await()
+            val finished = outcome.getOrElse { err ->
+                abortNow(asyncDestroy = false)
+                stdoutCollector.join(500)
+                stderrCollector.join(500)
+                return HostShellResult(
+                    exitCode = 127,
+                    stdoutBytes = stdoutCollector.bytes(),
+                    stderrBytes = (err.message ?: "Shizuku process error").toByteArray(Charsets.UTF_8),
+                )
+            }
             if (!finished) {
-                abortRemoteTree()
+                abortNow(asyncDestroy = false)
             } else {
                 runCatching { lifelineHandle?.close() }
             }
             stdoutCollector.join(1_000)
             stderrCollector.join(1_000)
-            val code = if (finished) runCatching { remote.exitValue() }.getOrDefault(1) else 124
+            val code = if (finished) runCatching { exitValue() }.getOrDefault(1) else 124
             HostShellResult(
                 exitCode = code,
                 stdoutBytes = stdoutCollector.bytes(),
@@ -424,18 +490,9 @@ class HostShellExecutor(
                 timedOut = !finished,
                 truncated = stdoutCollector.truncated || stderrCollector.truncated,
             )
-        } catch (e: InterruptedException) {
-            abortRemoteTree()
-            stdoutCollector.join(500)
-            stderrCollector.join(500)
+        } catch (e: CancellationException) {
+            abortNow(asyncDestroy = true)
             throw e
-        } catch (e: Throwable) {
-            abortRemoteTree()
-            HostShellResult(
-                exitCode = 127,
-                stdoutBytes = stdoutCollector.bytes(),
-                stderrBytes = (e.message ?: "Shizuku process error").toByteArray(Charsets.UTF_8),
-            )
         } finally {
             runCatching { lifelineHandle?.close() }
         }
@@ -527,16 +584,25 @@ class HostShellExecutor(
 
     /**
      * 当极少数环境无 `libshelldrop.so` 可用时（如纯 JVM 宿主测试或无 native 库环境），
-     * 使用纯 POSIX shell 建立 lifeline 监控，确保断开 stdin 时递归清理子进程树。
+     * 显式将真实 lifeline 输入备份到 FD 3（规避非交互 `/bin/sh` 后台命令 `&` 默认绑定 `/dev/null` 的标准行为），
+     * 确保正常执行绝不误触发 EOF，而在客户端超时/取消关闭 stdin 时立即递归强杀整棵后代进程树。
      */
     internal fun buildLifelineFallbackScript(innerScript: String): String =
-        "sh -c ${shellSingleQuote(innerScript)} </dev/null & " +
+        "exec 3<&0 </dev/null; " +
+            "sh -c ${shellSingleQuote(innerScript)} 3<&- </dev/null & " +
             "__rk_child=\$!; " +
-            "( IFS= read -r _ || true; " +
-            "pkill -9 -P \$__rk_child 2>/dev/null; kill -9 \$__rk_child 2>/dev/null ) >/dev/null 2>&1 & " +
+            "( " +
+            "kill_tree() { " +
+            "for __c in \$(pgrep -P \"\$1\" 2>/dev/null); do kill_tree \"\$__c\"; done; " +
+            "kill -9 \"\$1\" 2>/dev/null; " +
+            "}; " +
+            "IFS= read -r _ <&3 || true; " +
+            "kill_tree \"\$__rk_child\" " +
+            ") >/dev/null 2>&1 & " +
             "__rk_watch=\$!; " +
-            "wait \$__rk_child; __rk_rc=\$?; " +
-            "kill -9 \$__rk_watch 2>/dev/null; exit \$__rk_rc"
+            "exec 3<&-; " +
+            "wait \"\$__rk_child\"; __rk_rc=\$?; " +
+            "kill -9 \"\$__rk_watch\" 2>/dev/null; exit \$__rk_rc"
 
     private fun buildRecursiveKillScript(rootPid: Long): String =
         "kill_tree() { " +

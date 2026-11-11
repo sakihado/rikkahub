@@ -142,6 +142,20 @@ class SafeSdcardTrashWrapperTest {
     }
 
     @Test
+    fun `trailing options after targets like rm sdcard_file ws_dir -rf work identically to leading options`() {
+        val env = prepareIsolatedEnv()
+        val sdFile = File(env.fakeSdcard, "trailing.txt").apply { writeText("TRAILING") }
+        val buildCache = File(env.workspaceDir, "build-cache").apply { mkdirs() }
+        File(buildCache, "artifact.bin").writeText("BIN")
+
+        val (exit, out) = env.runWrapper("rm", sdFile.absolutePath, buildCache.absolutePath, "-rf")
+        assertEquals("Trailing -rf should succeed without treating -rf as filename, out=$out", 0, exit)
+        assertFalse(sdFile.exists())
+        assertFalse("build-cache should be recursively deleted by trailing -rf", buildCache.exists())
+        assertEquals("TRAILING", env.trashDir.listFiles()!!.single().readText())
+    }
+
+    @Test
     fun `refuses to delete trash directory itself or files inside trash`() {
         val env = prepareIsolatedEnv()
         val f = File(env.fakeSdcard, "doc.pdf").apply { writeText("PDF") }
