@@ -7,9 +7,10 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
 import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
-import me.rerere.rikkahub.phoneuse.RootPhoneController
+import me.rerere.rikkahub.phoneuse.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
 import me.rerere.tts.provider.TTSManager
 import java.io.File
@@ -21,8 +22,9 @@ class LocalTools(
     private val settingsStore: SettingsStore,
     private val phoneUseManager: PhoneUseManager,
     private val filesManager: FilesManager,
+    private val hostPrivilegeManager: HostPrivilegeManager,
     private val hostShellExecutor: HostShellExecutor,
-    private val rootPhoneController: RootPhoneController,
+    private val shellApprovalStore: ShellApprovalStore,
 ) {
     val javascriptTool by lazy { buildJavascriptTool() }
 
@@ -48,9 +50,7 @@ class LocalTools(
             manager = phoneUseManager,
             isFloatingWindowOn = { isFloatingChatWindowOn(context, settingsStore.settingsFlow.value) },
             ensureControllerReady = {
-                if (hostShellExecutor.ensurePrivilegedAccess(interactive = true)) {
-                    phoneUseManager.attachRoot(rootPhoneController)
-                }
+                hostPrivilegeManager.ensurePrivilegedAccess(interactive = true)
             },
             saveScreenshot = { bytes ->
                 filesManager.createChatFilesByByteArrays(
@@ -65,6 +65,7 @@ class LocalTools(
     val androidShellTool by lazy {
         buildAndroidShellTool(
             executor = hostShellExecutor,
+            approvalStore = shellApprovalStore,
             toolOutputsDir = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
         )
     }

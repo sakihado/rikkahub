@@ -25,6 +25,10 @@ class ShellPolicyEngineTest {
             "timeout 10 top -n 1",
             "ping -c 3 1.1.1.1",
             "ip addr show wlan0",
+            "sort -u /system/build.prop | uniq -c",
+            "sed -n '1,20p' /system/build.prop",
+            "sed 's/ro.build/RO_BUILD/g' /system/build.prop",
+            "screencap -p",
         )
         for (cmd in allowed) {
             val res = ShellPolicyEngine.evaluate(cmd, asRoot = false)
@@ -33,7 +37,7 @@ class ShellPolicyEngineTest {
     }
 
     @Test
-    fun `state-changing or screen-injecting commands require approval`() {
+    fun `state-changing, hidden file-writing or screen-injecting commands require approval`() {
         val askCommands = listOf(
             "pm clear com.example.demo",
             "pm uninstall com.example.demo",
@@ -47,14 +51,25 @@ class ShellPolicyEngineTest {
             "rm /sdcard/Download/temp.apk",
             "echo hello > /sdcard/Download/test.txt",
             "sed -i 's/a/b/g' /sdcard/test.txt",
+            "sed -n 'w /sdcard/Download/out.txt' /system/build.prop",
+            "sed 's/foo/bar/w /sdcard/Download/out.txt' /system/build.prop",
+            "sed -e '1,5W /sdcard/Download/out.txt' /system/build.prop",
+            "sort -o /sdcard/Download/out.txt /system/build.prop",
+            "sort -uo /sdcard/Download/out.txt /system/build.prop",
+            "sort --output=/sdcard/Download/out.txt /system/build.prop",
+            "uniq /system/build.prop /sdcard/Download/out.txt",
+            "screencap -p /sdcard/Download/cap.png",
+            "logcat -d -f /sdcard/Download/log.txt",
             "awk 'BEGIN { system(\"id\") }'",
+            "awk '{ print > \"/sdcard/Download/out.txt\" }' /system/build.prop",
             "find /sdcard/Download -name '*.tmp' -delete",
             "sqlite3 /sdcard/test.db 'DELETE FROM items'",
+            "sqlite3 -readonly /sdcard/test.db '.output /sdcard/out.txt' 'SELECT 1'",
             "logcat", // missing -d would hang
         )
         for (cmd in askCommands) {
             val res = ShellPolicyEngine.evaluate(cmd, asRoot = false)
-            assertEquals("Expected ASK for: $cmd", PolicyDecision.ASK, res.decision)
+            assertEquals("Expected ASK for: $cmd (got ${res.decision}: ${res.reason})", PolicyDecision.ASK, res.decision)
         }
     }
 

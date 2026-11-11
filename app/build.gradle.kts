@@ -1,6 +1,19 @@
 import com.android.build.api.dsl.Packaging
+import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Input
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import java.io.File
 import java.io.FileInputStream
 import java.util.Properties
 
@@ -151,9 +164,184 @@ baselineProfile {
 
 // baselineprofile 插件按 release 复制出 nonMinifiedRelease 时只关掉 isMinifyEnabled，关不掉 optimization，
 // 不手动关的话生成用的包会被 R8 内联、合并类，profile 里记下的是优化后的类和方法
+abstract class CompileShelldropJniLibsTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:Internal
+    abstract val sdkDirectoryHint: Property<String>
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun compile() {
+        val ndkDir = resolveNdkDirectory(sdkDirectoryHint.orNull)
+            ?: throw GradleException(
+                "Android NDK not found for compiling libshelldrop.so. " +
+                    "Set ANDROID_NDK_HOME / ANDROID_NDK_LATEST_HOME or install NDK under Android SDK/ndk."
+            )
+        val prebuiltRoot = File(ndkDir, "toolchains/llvm/prebuilt")
+        val hostBinDir = prebuiltRoot.listFiles()
+            ?.firstOrNull { File(it, "bin").isDirectory }
+            ?.let { File(it, "bin") }
+            ?: throw GradleException("LLVM toolchain prebuilt bin directory not found under $prebuiltRoot")
+
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        val ext = if (isWindows) ".cmd" else ""
+
+        val targets = mapOf(
+            "arm64-v8a" to "aarch64-linux-android26-clang$ext",
+            "x86_64" to "x86_64-linux-android26-clang$ext",
+        )
+
+        val outRoot = outputDir.get().asFile
+        outRoot.deleteRecursively()
+
+        val src = sourceFile.get().asFile
+        for ((abi, compilerName) in targets) {
+            val clang = File(hostBinDir, compilerName)
+            if (!clang.exists()) {
+                throw GradleException("NDK compiler missing: ${clang.absolutePath}")
+            }
+            val abiDir = File(outRoot, abi).apply { mkdirs() }
+            val outSo = File(abiDir, "libshelldrop.so")
+            val cmd = listOf(
+                clang.absolutePath,
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-fPIE",
+                "-pie",
+                "-Wl,-z,max-page-size=16384",
+                src.absolutePath,
+                "-o",
+                outSo.absolutePath,
+            )
+            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            val log = proc.inputStream.bufferedReader().readText()
+            val code = proc.waitFor()
+            if (code != 0 || !outSo.isFile) {
+                throw GradleException("Failed to compile libshelldrop.so for $abi (exit $code):\n$log")
+            }
+        }
+    }
+
+    private fun resolveNdkDirectory(sdkHint: String?): File? {
+        val envCandidates = listOfNotNull(
+            System.getenv("ANDROID_NDK_LATEST_HOME"),
+            System.getenv("ANDROID_NDK_HOME"),
+            System.getenv("ANDROID_NDK_ROOT"),
+            System.getenv("NDK_HOME"),
+        ).map(::File).filter { it.isDirectory }
+        if (envCandidates.isNotEmpty()) return envCandidates.first()
+
+        val sdkRoots = listOfNotNull(
+            sdkHint,
+            System.getenv("ANDROID_HOME"),
+            System.getenv("ANDROID_SDK_ROOT"),
+        ).map(::File).filter { it.isDirectory }
+
+        for (sdk in sdkRoots) {
+            val ndkParent = File(sdk, "ndk")
+            val latest = ndkParent.listFiles()
+                ?.filter { it.isDirectory && File(it, "toolchains/llvm/prebuilt").isDirectory }
+                ?.maxByOrNull { it.name }
+            if (latest != null) return latest
+            val legacy = File(sdk, "ndk-bundle")
+            if (File(legacy, "toolchains/llvm/prebuilt").isDirectory) return legacy
+        }
+        return null
+    }
+}
+
+abstract class CompileSafeSdcardAssetsTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val scriptFile: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:Input
+    abstract val requireOutputs: Property<Boolean>
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun compile() {
+        val outRoot = outputDir.get().asFile
+        outRoot.deleteRecursively()
+        val safesdcardDir = File(outRoot, "safesdcard").apply { mkdirs() }
+
+        val proc = ProcessBuilder(
+            "bash",
+            scriptFile.get().asFile.absolutePath,
+            safesdcardDir.absolutePath,
+        ).redirectErrorStream(true).start()
+        val log = proc.inputStream.bufferedReader().readText()
+        val exit = proc.waitFor()
+        if (log.isNotBlank()) {
+            logger.lifecycle(log.trim())
+        }
+        if (exit != 0) {
+            throw GradleException("build-safesdcard.sh failed (exit $exit):\n$log")
+        }
+
+        if (requireOutputs.get()) {
+            listOf("libsafesdcard_arm64.so", "libsafesdcard_x86_64.so").forEach { name ->
+                val f = File(safesdcardDir, name)
+                if (!f.isFile || f.length() == 0L) {
+                    throw GradleException(
+                        "Required PRoot trash-guard library missing: ${f.absolutePath}. " +
+                            "Install gcc & gcc-aarch64-linux-gnu on the build host."
+                    )
+                }
+            }
+        }
+    }
+}
+
+val localSdkDirHint: String = rootProject.file("local.properties")
+    .takeIf { it.isFile }
+    ?.let { propsFile ->
+        Properties().apply { propsFile.inputStream().use(::load) }.getProperty("sdk.dir")
+    }
+    .orEmpty()
+
+val compileShelldropJniLibs = tasks.register<CompileShelldropJniLibsTask>("compileShelldropJniLibs") {
+    sourceFile.set(project.layout.projectDirectory.file("shelldrop/shelldrop.c"))
+    sdkDirectoryHint.set(localSdkDirHint)
+    outputDir.set(project.layout.buildDirectory.dir("generated/shelldropJniLibs"))
+}
+
+val compileSafeSdcardAssets = tasks.register<CompileSafeSdcardAssetsTask>("compileSafeSdcardAssets") {
+    scriptFile.set(rootProject.layout.projectDirectory.file("workspace/safesdcard/build-safesdcard.sh"))
+    sourceFile.set(rootProject.layout.projectDirectory.file("workspace/safesdcard/safesdcard.c"))
+    requireOutputs.set(
+        providers.gradleProperty("requireSafeSdcard")
+            .map { it.equals("true", ignoreCase = true) }
+            .orElse(false)
+    )
+    outputDir.set(project.layout.buildDirectory.dir("generated/safesdcardAssets"))
+}
+
 androidComponents {
     finalizeDsl { extension ->
         extension.buildTypes.findByName("nonMinifiedRelease")?.optimization?.enable = false
+    }
+    onVariants(selector().withFlavor("distribution" to "github")) { variant ->
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(
+            compileShelldropJniLibs,
+            CompileShelldropJniLibsTask::outputDir,
+        )
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            compileSafeSdcardAssets,
+            CompileSafeSdcardAssetsTask::outputDir,
+        )
     }
 }
 

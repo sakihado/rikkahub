@@ -10,6 +10,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PolicyDecision
+import me.rerere.rikkahub.phoneuse.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.ShellPolicyEngine
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -34,6 +35,7 @@ private const val MAX_HEADER_STDERR_BYTES = 6 * 1024
 class HostBridgeDaemon(
     private val bridgeDir: File,
     private val executor: HostShellExecutor,
+    private val approvalStore: ShellApprovalStore = ShellApprovalStore(),
 ) {
     private val token: String = generateToken()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -116,7 +118,7 @@ class HostBridgeDaemon(
                 }
 
                 PolicyDecision.ASK -> {
-                    if (!(policy.canRememberInSession && executor.hasSessionApproval(command, asRoot))) {
+                    if (!(policy.canRememberInSession && approvalStore.hasApproval(command, asRoot))) {
                         writeResponse(
                             socket = sock,
                             httpCode = 200,

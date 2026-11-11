@@ -156,17 +156,19 @@ class RootfsPatcher {
     }
 
     /**
-     * 在 Rootfs 的 `/usr/local/bin/` 下安装：
+     * 在 Rootfs 的 `/usr/local/` 下安装：
      * 1. `host-sh`（及别名 `rish`）：通过本地桥接守护进程调用 Android 宿主机命令，stdout 字节流无损回传。
-     * 2. `rm` / `rmdir` / `unlink` 防误删包装器：操作 `/workspace`、`/tmp` 时原样透传；
-     *    一旦目标解析到 `/sdcard` 或 `/storage`，自动移入 `/sdcard/.Trash-RikkaHub/` 回收站并禁止二次抹除。
-     * 3. 若首次检测到 gcc/cc 可用，顺手编译 `/usr/local/lib/libsafesdcard.so` 供 Python/Node 的 unlink 系统调用兜底。
+     * 2. `/usr/local/libexec/rikkahub-sdcard-trash`：统一的 `/sdcard` 防误删回收站核心逻辑（防碰撞、防二次删除）。
+     * 3. `rm` / `rmdir` / `unlink` 包装器：操作 `/workspace`、`/tmp` 时保留 100% 原始选项语义透传；
+     *    一旦目标解析到 `/sdcard` 或 `/storage`，统一委托给回收站 helper 整块移入 `/sdcard/.Trash-RikkaHub/`。
      */
     private fun ensureHostBridgeScripts(linuxDir: File) {
         val binDir = File(linuxDir, "usr/local/bin").apply { mkdirs() }
+        val libexecDir = File(linuxDir, "usr/local/libexec").apply { mkdirs() }
 
         writeExecutableIfChanged(File(binDir, "host-sh"), HOST_SH_SCRIPT)
         writeExecutableIfChanged(File(binDir, "rish"), RISH_WRAPPER_SCRIPT)
+        writeExecutableIfChanged(File(libexecDir, "rikkahub-sdcard-trash"), SDCARD_TRASH_HELPER_SCRIPT)
         writeExecutableIfChanged(File(binDir, "rm"), SAFE_RM_SCRIPT)
         writeExecutableIfChanged(File(binDir, "rmdir"), SAFE_RMDIR_SCRIPT)
         writeExecutableIfChanged(File(binDir, "unlink"), SAFE_UNLINK_SCRIPT)
@@ -260,7 +262,7 @@ class RootfsPatcher {
             TOKEN="${'$'}(grep '^TOKEN=' "${'$'}ENDPOINT_FILE" | cut -d= -f2)"
 
             HDR_FILE="${'$'}(mktemp /tmp/hostsh_hdr.XXXXXX)"
-            cleanup() { rm -f "${'$'}HDR_FILE"; }
+            cleanup() { /bin/rm -f "${'$'}HDR_FILE"; }
             trap cleanup EXIT INT TERM
 
             if command -v curl >/dev/null 2>&1; then
@@ -297,103 +299,338 @@ class RootfsPatcher {
             exec /usr/local/bin/host-sh "${'$'}@"
         """.trimIndent() + "\n"
 
+        /**
+         * 统一回收站逻辑（供 rm / rmdir / unlink 共享调用）：
+         * 参数: <tool_name> <mode:rm|rmdir|unlink> <force:0|1> <recursive:0|1> <dir_flag:0|1> <target> <resolved>
+         * 每次移入均寻找唯一不存在的目标名（纳秒/秒 + PID + 递增序号），绝不覆盖已有同名备份。
+         */
+        private val SDCARD_TRASH_HELPER_SCRIPT = """
+            #!/bin/sh
+            TOOL="${'$'}1"
+            MODE="${'$'}2"
+            FORCE="${'$'}3"
+            RECURSIVE="${'$'}4"
+            DIR_FLAG="${'$'}5"
+            TARGET="${'$'}6"
+            RESOLVED="${'$'}7"
+            TRASH_DIR="/sdcard/.Trash-RikkaHub"
+
+            case "${'$'}RESOLVED" in
+              /sdcard|/storage/emulated/0)
+                echo "${'$'}TOOL: refusing to remove root storage directory '${'$'}TARGET'" >&2
+                exit 1
+                ;;
+              /sdcard/.Trash-RikkaHub|/sdcard/.Trash-RikkaHub/*|/storage/emulated/0/.Trash-RikkaHub|/storage/emulated/0/.Trash-RikkaHub/*)
+                echo "${'$'}TOOL: refusing to permanently delete files inside '${'$'}TRASH_DIR'" >&2
+                exit 1
+                ;;
+            esac
+
+            if [ ! -e "${'$'}TARGET" ] && [ ! -L "${'$'}TARGET" ]; then
+              if [ "${'$'}FORCE" -eq 1 ]; then
+                exit 0
+              fi
+              echo "${'$'}TOOL: cannot remove '${'$'}TARGET': No such file or directory" >&2
+              exit 1
+            fi
+
+            if [ "${'$'}MODE" = "unlink" ]; then
+              if [ -d "${'$'}TARGET" ] && [ ! -L "${'$'}TARGET" ]; then
+                echo "unlink: cannot unlink '${'$'}TARGET': Is a directory" >&2
+                exit 1
+              fi
+            elif [ "${'$'}MODE" = "rmdir" ]; then
+              if [ -L "${'$'}TARGET" ] || [ ! -d "${'$'}TARGET" ]; then
+                echo "rmdir: failed to remove '${'$'}TARGET': Not a directory" >&2
+                exit 1
+              fi
+              if [ -n "${'$'}(ls -A -- "${'$'}TARGET" 2>/dev/null)" ]; then
+                echo "rmdir: failed to remove '${'$'}TARGET': Directory not empty" >&2
+                exit 1
+              fi
+            elif [ "${'$'}MODE" = "rm" ]; then
+              if [ -d "${'$'}TARGET" ] && [ ! -L "${'$'}TARGET" ] && [ "${'$'}RECURSIVE" -eq 0 ]; then
+                if [ "${'$'}DIR_FLAG" -eq 0 ]; then
+                  echo "rm: cannot remove '${'$'}TARGET': Is a directory" >&2
+                  exit 1
+                fi
+                if [ -n "${'$'}(ls -A -- "${'$'}TARGET" 2>/dev/null)" ]; then
+                  echo "rm: cannot remove '${'$'}TARGET': Directory not empty" >&2
+                  exit 1
+                fi
+              fi
+            fi
+
+            mkdir -p "${'$'}TRASH_DIR" || exit 1
+            CLEAN_TARGET="${'$'}TARGET"
+            case "${'$'}CLEAN_TARGET" in
+              ?*/) CLEAN_TARGET="${'$'}(printf '%s' "${'$'}CLEAN_TARGET" | sed 's:/*${'$'}::')" ;;
+            esac
+            BASE="${'$'}(basename -- "${'$'}CLEAN_TARGET")"
+            [ -z "${'$'}BASE" ] && BASE="item"
+
+            STAMP="${'$'}(date +%Y%m%d_%H%M%S_%N 2>/dev/null)"
+            case "${'$'}STAMP" in
+              *%N*|"") STAMP="${'$'}(date +%Y%m%d_%H%M%S)_${'$'}${'$'}" ;;
+            esac
+
+            SEQ=0
+            while :; do
+              if [ "${'$'}SEQ" -eq 0 ]; then
+                DEST="${'$'}TRASH_DIR/${'$'}{STAMP}_${'$'}${'$'}_${'$'}{BASE}"
+              else
+                DEST="${'$'}TRASH_DIR/${'$'}{STAMP}_${'$'}${'$'}_${'$'}{SEQ}_${'$'}{BASE}"
+              fi
+              if [ ! -e "${'$'}DEST" ] && [ ! -L "${'$'}DEST" ]; then
+                break
+              fi
+              SEQ=${'$'}((SEQ + 1))
+            done
+
+            mv -n -- "${'$'}TARGET" "${'$'}DEST" 2>/dev/null || mv -- "${'$'}TARGET" "${'$'}DEST" || exit 1
+            if [ -e "${'$'}TARGET" ] || [ -L "${'$'}TARGET" ]; then
+              echo "${'$'}TOOL: refused overwrite while moving '${'$'}TARGET' to trash" >&2
+              exit 1
+            fi
+            exit 0
+        """.trimIndent() + "\n"
+
         private val SAFE_RM_SCRIPT = """
             #!/bin/sh
-            # Protect /sdcard files by moving them to /sdcard/.Trash-RikkaHub instead of permanent deletion
+            # Protect /sdcard paths via trash while preserving 100% native rm flags on non-/sdcard paths
             REAL_RM="/bin/rm"
             [ -x "/usr/bin/rm" ] && [ ! -x "${'$'}REAL_RM" ] && REAL_RM="/usr/bin/rm"
+            HELPER="/usr/local/libexec/rikkahub-sdcard-trash"
 
-            TRASH_DIR="/sdcard/.Trash-RikkaHub"
+            resolve_target() {
+              p="${'$'}1"
+              case "${'$'}p" in
+                ?*/) p="${'$'}(printf '%s' "${'$'}p" | sed 's:/*${'$'}::')" ;;
+              esac
+              parent="${'$'}(dirname -- "${'$'}p")"
+              leaf="${'$'}(basename -- "${'$'}p")"
+              rp="${'$'}(realpath -m -- "${'$'}parent" 2>/dev/null || printf '%s' "${'$'}parent")"
+              if [ "${'$'}leaf" = "/" ] || [ "${'$'}leaf" = "." ]; then
+                realpath -m -- "${'$'}p" 2>/dev/null || printf '%s' "${'$'}p"
+              elif [ "${'$'}rp" = "/" ]; then
+                printf '/%s' "${'$'}leaf"
+              else
+                printf '%s/%s' "${'$'}rp" "${'$'}leaf"
+              fi
+            }
+
+            is_sdcard() {
+              case "${'$'}1" in
+                /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*) return 0 ;;
+                *) return 1 ;;
+              esac
+            }
+
+            FORCE=0
+            RECURSIVE=0
+            DIR_FLAG=0
+            END_OPTS=0
             HAS_SDCARD=0
+            HAS_TARGET=0
+
             for arg in "${'$'}@"; do
-              case "${'$'}arg" in
-                -*) ;;
+              if [ "${'$'}END_OPTS" -eq 0 ]; then
+                case "${'$'}arg" in
+                  --) END_OPTS=1; continue ;;
+                  --force) FORCE=1; continue ;;
+                  --recursive) RECURSIVE=1; continue ;;
+                  --dir) DIR_FLAG=1; continue ;;
+                  --help|--version) exec "${'$'}REAL_RM" "${'$'}@" ;;
+                  --*) continue ;;
+                  -?*)
+                    opt="${'$'}{arg#-}"
+                    while [ -n "${'$'}opt" ]; do
+                      ch="${'$'}(printf '%s' "${'$'}opt" | cut -c1)"
+                      opt="${'$'}(printf '%s' "${'$'}opt" | cut -c2-)"
+                      case "${'$'}ch" in
+                        f) FORCE=1 ;;
+                        r|R) RECURSIVE=1 ;;
+                        d) DIR_FLAG=1 ;;
+                      esac
+                    done
+                    continue
+                    ;;
+                esac
+              fi
+              HAS_TARGET=1
+              RES="${'$'}(resolve_target "${'$'}arg")"
+              if is_sdcard "${'$'}RES"; then
+                HAS_SDCARD=1
+              fi
+            done
+
+            if [ "${'$'}HAS_TARGET" -eq 0 ] || [ "${'$'}HAS_SDCARD" -eq 0 ]; then
+              exec "${'$'}REAL_RM" "${'$'}@"
+            fi
+
+            # Re-collect option tokens cleanly into $@ before iterating targets
+            ORIG_COUNT=${'$'}#
+            END_OPTS=0
+            IDX=0
+            while [ "${'$'}IDX" -lt "${'$'}ORIG_COUNT" ]; do
+              arg="${'$'}1"
+              shift
+              IDX=${'$'}((IDX + 1))
+              if [ "${'$'}END_OPTS" -eq 0 ]; then
+                case "${'$'}arg" in
+                  --) END_OPTS=1; continue ;;
+                  -?*) set -- "${'$'}@" "${'$'}arg"; continue ;;
+                esac
+              fi
+              set -- "${'$'}@" "__TARGET__:${'$'}arg"
+            done
+
+            # Extract options vs targets using positional parameters safely (supports spaces/newlines)
+            STATUS=0
+            TOTAL=${'$'}#
+            # Count how many leading option args we kept
+            OPT_COUNT=0
+            for item in "${'$'}@"; do
+              case "${'$'}item" in
+                __TARGET__:*) break ;;
+                *) OPT_COUNT=${'$'}((OPT_COUNT + 1)) ;;
+              esac
+            done
+
+            I=0
+            while [ "${'$'}I" -lt "${'$'}TOTAL" ]; do
+              item="${'$'}1"
+              shift
+              I=${'$'}((I + 1))
+              case "${'$'}item" in
+                __TARGET__:*)
+                  target="${'$'}{item#__TARGET__:}"
+                  RES="${'$'}(resolve_target "${'$'}target")"
+                  if is_sdcard "${'$'}RES"; then
+                    "${'$'}HELPER" "rm" "rm" "${'$'}FORCE" "${'$'}RECURSIVE" "${'$'}DIR_FLAG" "${'$'}target" "${'$'}RES" || STATUS=1
+                  else
+                    # Keep non-sdcard target in positional queue so REAL_RM runs once with exact original flags
+                    set -- "${'$'}@" "${'$'}item"
+                  fi
+                  ;;
                 *)
-                  RESOLVED="${'$'}(realpath -m "${'$'}arg" 2>/dev/null || echo "${'$'}arg")"
-                  case "${'$'}RESOLVED" in
-                    /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
-                      HAS_SDCARD=1
-                      ;;
-                  esac
+                  set -- "${'$'}@" "${'$'}item"
                   ;;
               esac
             done
 
-            if [ "${'$'}HAS_SDCARD" -eq 0 ]; then
-              exec "${'$'}REAL_RM" "${'$'}@"
+            # Any remaining __TARGET__:* items in $@ are non-/sdcard paths; invoke REAL_RM once with exact original flags!
+            NON_SD_COUNT=0
+            ROT=${'$'}#
+            J=0
+            while [ "${'$'}J" -lt "${'$'}ROT" ]; do
+              cur="${'$'}1"
+              shift
+              J=${'$'}((J + 1))
+              case "${'$'}cur" in
+                __TARGET__:*)
+                  NON_SD_COUNT=${'$'}((NON_SD_COUNT + 1))
+                  ;;
+              esac
+              set -- "${'$'}@" "${'$'}cur"
+            done
+
+            if [ "${'$'}NON_SD_COUNT" -gt 0 ]; then
+              # Put options first, then --, then stripped non-sdcard targets
+              FINAL_TOTAL=${'$'}#
+              K=0
+              while [ "${'$'}K" -lt "${'$'}OPT_COUNT" ]; do
+                opt_item="${'$'}1"
+                shift
+                set -- "${'$'}@" "${'$'}opt_item"
+                K=${'$'}((K + 1))
+              done
+              set -- "${'$'}@" "--"
+              REM=${'$'}((FINAL_TOTAL - OPT_COUNT))
+              K=0
+              while [ "${'$'}K" -lt "${'$'}REM" ]; do
+                tgt_item="${'$'}1"
+                shift
+                set -- "${'$'}@" "${'$'}{tgt_item#__TARGET__:}"
+                K=${'$'}((K + 1))
+              done
+              # Shift off the old prefix so $@ has ONLY: <orig_opts...> -- <non_sdcard_targets...>
+              "${'$'}REAL_RM" "${'$'}@" || STATUS=${'$'}?
             fi
 
-            FORCE=0
-            STATUS=0
+            exit "${'$'}STATUS"
+        """.trimIndent() + "\n"
+
+        private val SAFE_RMDIR_SCRIPT = """
+            #!/bin/sh
+            REAL_RMDIR="/bin/rmdir"
+            [ -x "/usr/bin/rmdir" ] && [ ! -x "${'$'}REAL_RMDIR" ] && REAL_RMDIR="/usr/bin/rmdir"
+            HELPER="/usr/local/libexec/rikkahub-sdcard-trash"
+
+            END_OPTS=0
+            HAS_SDCARD=0
             for arg in "${'$'}@"; do
-              case "${'$'}arg" in
-                -*f*) FORCE=1 ;;
-                -*) ;;
+              if [ "${'$'}END_OPTS" -eq 0 ]; then
+                case "${'$'}arg" in
+                  --) END_OPTS=1; continue ;;
+                  --help|--version) exec "${'$'}REAL_RMDIR" "${'$'}@" ;;
+                  -?*) continue ;;
+                esac
+              fi
+              RESOLVED="${'$'}(realpath -m -- "${'$'}arg" 2>/dev/null || printf '%s' "${'$'}arg")"
+              case "${'$'}RESOLVED" in
+                /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*) HAS_SDCARD=1 ;;
+              esac
+            done
+
+            if [ "${'$'}HAS_SDCARD" -eq 0 ]; then
+              exec "${'$'}REAL_RMDIR" "${'$'}@"
+            fi
+
+            STATUS=0
+            END_OPTS=0
+            for arg in "${'$'}@"; do
+              if [ "${'$'}END_OPTS" -eq 0 ]; then
+                case "${'$'}arg" in
+                  --) END_OPTS=1; continue ;;
+                  -?*) continue ;;
+                esac
+              fi
+              RESOLVED="${'$'}(realpath -m -- "${'$'}arg" 2>/dev/null || printf '%s' "${'$'}arg")"
+              case "${'$'}RESOLVED" in
+                /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
+                  "${'$'}HELPER" "rmdir" "rmdir" 0 0 1 "${'$'}arg" "${'$'}RESOLVED" || STATUS=1
+                  ;;
                 *)
-                  RESOLVED="${'$'}(realpath -m "${'$'}arg" 2>/dev/null || echo "${'$'}arg")"
-                  case "${'$'}RESOLVED" in
-                    /sdcard|/storage/emulated/0)
-                      echo "rm: refusing to remove root storage directory '${'$'}arg'" >&2
-                      STATUS=1
-                      ;;
-                    /sdcard/.Trash-RikkaHub|/sdcard/.Trash-RikkaHub/*|/storage/emulated/0/.Trash-RikkaHub|/storage/emulated/0/.Trash-RikkaHub/*)
-                      echo "rm: refusing to permanently delete files inside '${'$'}TRASH_DIR'" >&2
-                      STATUS=1
-                      ;;
-                    /sdcard/*|/storage/emulated/0/*)
-                      if [ -e "${'$'}arg" ] || [ -L "${'$'}arg" ]; then
-                        mkdir -p "${'$'}TRASH_DIR"
-                        BASE="${'$'}(basename "${'$'}arg")"
-                        TS="${'$'}(date +%s)_${'$'}${'$'}"
-                        mv -- "${'$'}arg" "${'$'}TRASH_DIR/${'$'}{TS}_${'$'}{BASE}" || STATUS=1
-                      elif [ "${'$'}FORCE" -eq 0 ]; then
-                        echo "rm: cannot remove '${'$'}arg': No such file or directory" >&2
-                        STATUS=1
-                      fi
-                      ;;
-                    *)
-                      if [ "${'$'}FORCE" -eq 1 ]; then
-                        "${'$'}REAL_RM" -rf -- "${'$'}arg" || STATUS=1
-                      else
-                        "${'$'}REAL_RM" -r -- "${'$'}arg" || STATUS=1
-                      fi
-                      ;;
-                  esac
+                  "${'$'}REAL_RMDIR" -- "${'$'}arg" || STATUS=1
                   ;;
               esac
             done
             exit "${'$'}STATUS"
         """.trimIndent() + "\n"
 
-        private val SAFE_RMDIR_SCRIPT = """
-            #!/bin/sh
-            for arg in "${'$'}@"; do
-              case "${'$'}arg" in
-                -*) ;;
-                *)
-                  RESOLVED="${'$'}(realpath -m "${'$'}arg" 2>/dev/null || echo "${'$'}arg")"
-                  case "${'$'}RESOLVED" in
-                    /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
-                      exec /usr/local/bin/rm "${'$'}@"
-                      ;;
-                  esac
-                  ;;
-              esac
-            done
-            exec /bin/rmdir "${'$'}@"
-        """.trimIndent() + "\n"
-
         private val SAFE_UNLINK_SCRIPT = """
             #!/bin/sh
+            REAL_UNLINK="/usr/bin/unlink"
+            [ -x "/bin/unlink" ] && [ ! -x "${'$'}REAL_UNLINK" ] && REAL_UNLINK="/bin/unlink"
+            HELPER="/usr/local/libexec/rikkahub-sdcard-trash"
+
             if [ "${'$'}#" -eq 1 ]; then
-              RESOLVED="${'$'}(realpath -m "${'$'}1" 2>/dev/null || echo "${'$'}1")"
+              case "${'$'}1" in
+                --help|--version) exec "${'$'}REAL_UNLINK" "${'$'}@" ;;
+              esac
+              p="${'$'}1"
+              parent="${'$'}(dirname -- "${'$'}p")"
+              leaf="${'$'}(basename -- "${'$'}p")"
+              rp="${'$'}(realpath -m -- "${'$'}parent" 2>/dev/null || printf '%s' "${'$'}parent")"
+              if [ "${'$'}rp" = "/" ]; then RESOLVED="/${'$'}leaf"; else RESOLVED="${'$'}rp/${'$'}leaf"; fi
               case "${'$'}RESOLVED" in
                 /sdcard|/sdcard/*|/storage/emulated/0|/storage/emulated/0/*)
-                  exec /usr/local/bin/rm -- "${'$'}1"
+                  exec "${'$'}HELPER" "unlink" "unlink" 0 0 0 "${'$'}1" "${'$'}RESOLVED"
                   ;;
               esac
             fi
-            exec /usr/bin/unlink "${'$'}@"
+            exec "${'$'}REAL_UNLINK" "${'$'}@"
         """.trimIndent() + "\n"
     }
 }

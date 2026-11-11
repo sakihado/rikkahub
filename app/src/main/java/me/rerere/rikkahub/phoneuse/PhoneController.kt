@@ -52,7 +52,7 @@ interface PhoneController {
      * 屏幕上所有可见窗口所属的应用，和 [captureScreen] 读取的窗口范围一致，不算本应用自己的悬浮窗。
      * 分屏或下拉通知栏时不止一个；只用来判断屏幕上有谁，不影响元素编号
      */
-    fun visiblePackages(): Set<String>
+    suspend fun visiblePackages(): Set<String>
 
     /** 读取当前屏幕上的元素，不包含本应用自己的悬浮窗 */
     suspend fun captureScreen(): PhoneScreen
@@ -70,7 +70,7 @@ interface PhoneController {
 
     fun listApps(): List<PhoneApp>
 
-    fun openApp(packageName: String): Boolean
+    suspend fun openApp(packageName: String): Boolean
 
     /** 免截图获取顶层 Activity / Intent / Fragment 详情（Root/Shell 后端支持） */
     suspend fun dumpTopActivity(): String? = null

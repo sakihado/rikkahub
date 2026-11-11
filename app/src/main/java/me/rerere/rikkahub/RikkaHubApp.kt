@@ -38,6 +38,7 @@ import me.rerere.rikkahub.di.appModule
 import me.rerere.rikkahub.di.dataSourceModule
 import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
+import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
 import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.RootPhoneController
@@ -230,21 +231,12 @@ class RikkaHubApp : Application() {
                 }
                 get<HostBridgeDaemon>().start()
 
-                val executor = get<HostShellExecutor>()
-                val phoneUseManager = get<PhoneUseManager>()
-                executor.initializeOnStartup { backend ->
-                    if (backend.isPrivileged) {
-                        get<AppScope>().launch(Dispatchers.IO) {
-                            executor.ensureStorageAccess(packageName)
-                        }
-                        if (PhoneUseManager.isSupported) {
-                            phoneUseManager.attachRoot(get<RootPhoneController>())
-                        }
-                        Log.i(TAG, "Privileged host backend active ($backend)")
-                    } else if (PhoneUseManager.isSupported) {
-                        phoneUseManager.detachRoot()
-                    }
-                }
+                get<HostPrivilegeManager>().initializeLifecycle(
+                    appScope = get<AppScope>(),
+                    phoneUseManager = get<PhoneUseManager>(),
+                    rootPhoneControllerProvider = { get<RootPhoneController>() },
+                    executor = get<HostShellExecutor>(),
+                )
             }.onFailure {
                 Log.w(TAG, "initHostBridgeAndRoot failed", it)
             }

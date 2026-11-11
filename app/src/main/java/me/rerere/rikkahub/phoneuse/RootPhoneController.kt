@@ -15,7 +15,6 @@ import android.view.WindowManager
 import androidx.core.graphics.scale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
 import java.io.ByteArrayOutputStream
@@ -51,7 +50,7 @@ class RootPhoneController(
     @Volatile
     private var cachedVisiblePackages: Set<String> = emptySet()
 
-    override fun visiblePackages(): Set<String> = runBlocking(Dispatchers.IO) {
+    override suspend fun visiblePackages(): Set<String> = withContext(Dispatchers.IO) {
         queryVisiblePackages()
     }
 
@@ -258,18 +257,16 @@ class RootPhoneController(
             .sortedBy { it.label.lowercase() }
     }
 
-    override fun openApp(packageName: String): Boolean {
-        val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return false
-        val component = launchIntent.component ?: return false
+    override suspend fun openApp(packageName: String): Boolean = withContext(Dispatchers.IO) {
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return@withContext false
+        val component = launchIntent.component ?: return@withContext false
         val flat = "${component.packageName}/${component.className}"
-        return runBlocking(Dispatchers.IO) {
-            val res = executor.execute(
-                command = "am start -n ${shellSingleQuote(flat)}",
-                asRoot = false,
-                timeoutMs = 6_000L,
-            )
-            res.exitCode == 0 && !res.stderr.contains("Error", ignoreCase = true)
-        }
+        val res = executor.execute(
+            command = "am start -n ${shellSingleQuote(flat)}",
+            asRoot = false,
+            timeoutMs = 6_000L,
+        )
+        res.exitCode == 0 && !res.stderr.contains("Error", ignoreCase = true)
     }
 
     override suspend fun dumpTopActivity(): String = withContext(Dispatchers.IO) {

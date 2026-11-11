@@ -19,6 +19,27 @@ data class PolicyEvaluation(
 )
 
 /**
+ * 会话级命令审批缓存（与底层进程执行器解耦，专职记录本进程生命周期内已获用户批准的可复用命令）
+ */
+class ShellApprovalStore {
+    private val approvedKeys: MutableSet<String> = java.util.Collections.synchronizedSet(LinkedHashSet())
+
+    fun hasApproval(command: String, asRoot: Boolean): Boolean =
+        key(command, asRoot) in approvedKeys
+
+    fun recordApproval(command: String, asRoot: Boolean) {
+        approvedKeys += key(command, asRoot)
+    }
+
+    fun clear() {
+        approvedKeys.clear()
+    }
+
+    private fun key(command: String, asRoot: Boolean): String =
+        "${if (asRoot) "root" else "shell"}:${command.trim()}"
+}
+
+/**
  * 统一宿主命令策略引擎（供 android_shell、工作区 host-sh、PhoneUse 共同调用）
  *
  * 参考 Claude Code 权限模型：
@@ -114,6 +135,7 @@ object ShellPolicyEngine {
         "svc",
     )
 
+    /** 仅包含自身绝无写文件选项或已在上方显式拦截写参数的纯只读命令 */
     private val PURE_READ_ONLY_BINARIES = setOf(
         "ls",
         "stat",
@@ -140,17 +162,12 @@ object ShellPolicyEngine {
         "wc",
         "cut",
         "tr",
-        "sort",
-        "uniq",
         "diff",
         "cmp",
         "md5sum",
         "sha1sum",
         "sha256sum",
-        "base64",
-        "xxd",
-        "od",
-        "strings",
+        "sha512sum",
         "readlink",
         "realpath",
         "dirname",
@@ -167,12 +184,13 @@ object ShellPolicyEngine {
         "ifconfig",
         "getenforce",
         "getprop",
-        "screencap",
         "lsmod",
         "printenv",
         "seq",
         "expr",
         "jq",
+        "od",
+        "strings",
     )
 
     private val SAFE_REDIRECT_REGEX = Regex("""(?:[12&]?>>?\s*/dev/null|[12]>&[12])""")
@@ -380,7 +398,8 @@ object ShellPolicyEngine {
 
         if (cmd == "find") {
             val hasDestructive = args.any {
-                it in setOf("-delete", "-exec", "-execdir", "-ok", "-okdir") || it.startsWith("-fprint")
+                it in setOf("-delete", "-exec", "-execdir", "-ok", "-okdir") ||
+                    it.startsWith("-fprint") || it.startsWith("-fls")
             }
             if (hasDestructive) {
                 val searchPaths = args.takeWhile { !it.startsWith("-") && it != "!" && it != "(" }
@@ -392,14 +411,14 @@ object ShellPolicyEngine {
                 }
                 return PolicyEvaluation(
                     PolicyDecision.ASK,
-                    "带执行或删除动作的 find 命令需确认",
+                    "带执行、删除或写文件动作的 find 命令需确认",
                     canRememberInSession = false,
                 )
             }
             return finishAllowOrEnvAsk(hasRiskyEnv, "find 只读搜索")
         }
 
-        // ---- 第二层：细分 Android 与系统工具规则 ----
+        // ---- 第二层：细分 Android 与带隐藏写选项的工具规则 ----
         if (cmd == "input") {
             return PolicyEvaluation(
                 PolicyDecision.ASK,
@@ -506,6 +525,12 @@ object ShellPolicyEngine {
             if (clears) {
                 return PolicyEvaluation(PolicyDecision.ASK, "清空系统日志 (logcat -c) 需确认", false)
             }
+            val writesFile = args.any {
+                it == "-f" || it.startsWith("-f") || it == "--file" || it.startsWith("--file=")
+            }
+            if (writesFile) {
+                return PolicyEvaluation(PolicyDecision.ASK, "logcat -f 写入文件需确认", false)
+            }
             val dumpsAndExits = args.any { arg ->
                 arg == "-d" || arg == "--dump" ||
                     (arg.startsWith("-") && !arg.startsWith("--") && 'd' in arg)
@@ -527,33 +552,108 @@ object ShellPolicyEngine {
                     return finishAllowOrEnvAsk(hasRiskyEnv, "uiautomator dump")
                 }
             }
-            return PolicyEvaluation(PolicyDecision.ASK, "uiautomator 操作需确认")
+            return PolicyEvaluation(PolicyDecision.ASK, "uiautomator 写入文件操作需确认")
+        }
+
+        if (cmd == "screencap") {
+            val positional = args.filterNot { it.startsWith("-") }
+            if (positional.isEmpty()) {
+                return finishAllowOrEnvAsk(hasRiskyEnv, "screencap 标准输出截图")
+            }
+            return PolicyEvaluation(PolicyDecision.ASK, "screencap 写入文件需确认", false)
+        }
+
+        if (cmd == "sort") {
+            val hasOutputFlag = args.any { arg ->
+                arg == "-o" || arg == "--output" || arg.startsWith("--output=") ||
+                    (arg.startsWith("-") && !arg.startsWith("--") && 'o' in arg.drop(1))
+            }
+            if (hasOutputFlag) {
+                return PolicyEvaluation(PolicyDecision.ASK, "sort -o 写入输出文件需确认", false)
+            }
+            return finishAllowOrEnvAsk(hasRiskyEnv, "sort 只读排序")
+        }
+
+        if (cmd == "uniq") {
+            // uniq [OPTION]... [INPUT [OUTPUT]] — 超过 1 个位置参数时第 2 个参数为输出文件
+            val positional = collectPositionalArgs(
+                args = args,
+                flagsWithValue = setOf("-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"),
+            )
+            if (positional.size >= 2) {
+                return PolicyEvaluation(PolicyDecision.ASK, "uniq 指定了输出文件参数需确认", false)
+            }
+            return finishAllowOrEnvAsk(hasRiskyEnv, "uniq 只读去重")
+        }
+
+        if (cmd == "base64" || cmd == "xxd") {
+            val hasOutputFlag = args.any { arg ->
+                arg == "-o" || arg.startsWith("-o") || arg == "--output" || arg.startsWith("--output=")
+            }
+            val positional = collectPositionalArgs(
+                args = args,
+                flagsWithValue = setOf("-c", "-g", "-l", "-s", "-w"),
+            )
+            if (hasOutputFlag || (cmd == "xxd" && positional.size >= 2)) {
+                return PolicyEvaluation(PolicyDecision.ASK, "$cmd 写入输出文件需确认", false)
+            }
+            return finishAllowOrEnvAsk(hasRiskyEnv, "$cmd 只读编码转换")
         }
 
         if (cmd == "sed") {
-            val inPlace = args.any { it == "-i" || it.startsWith("-i") || it == "--in-place" }
-            if (inPlace) {
-                return PolicyEvaluation(PolicyDecision.ASK, "sed -i 原地修改文件需确认", false)
+            val inPlaceOrScriptFile = args.any {
+                it == "-i" || it.startsWith("-i") || it == "--in-place" || it.startsWith("--in-place=") ||
+                    it == "-f" || it.startsWith("-f") || it == "--file" || it.startsWith("--file=")
             }
-            return finishAllowOrEnvAsk(hasRiskyEnv, "sed 文本处理")
+            if (inPlaceOrScriptFile) {
+                return PolicyEvaluation(PolicyDecision.ASK, "sed 原地修改或外部脚本文件需确认", false)
+            }
+            val scripts = extractSedScripts(args)
+            if (scripts.any(::hasMutatingSedCommand)) {
+                return PolicyEvaluation(PolicyDecision.ASK, "sed 包含写文件 (w/W) 或外部执行 (e) 指令需确认", false)
+            }
+            return finishAllowOrEnvAsk(hasRiskyEnv, "sed 只读文本处理")
+        }
+
+        if (cmd == "date") {
+            val setsClock = args.any { it == "-s" || it.startsWith("-s") || it == "--set" || it.startsWith("--set=") }
+            if (setsClock) {
+                return PolicyEvaluation(PolicyDecision.ASK, "修改系统时间 (date -s) 需确认", false)
+            }
+            return finishAllowOrEnvAsk(hasRiskyEnv, "date 时间查询")
+        }
+
+        if (cmd == "ifconfig") {
+            if (args.size <= 1) {
+                return finishAllowOrEnvAsk(hasRiskyEnv, "ifconfig 接口状态查询")
+            }
+            return PolicyEvaluation(PolicyDecision.ASK, "修改网卡配置 (ifconfig) 需确认", false)
         }
 
         if (cmd in setOf("awk", "gawk", "mawk")) {
-            val canExec = args.any { "system(" in it || "getline" in it }
-            if (canExec) {
-                return PolicyEvaluation(PolicyDecision.ASK, "awk 包含外部调用需确认", false)
+            val hasScriptFile = args.any { it == "-f" || it.startsWith("-f") || it == "--file" || it.startsWith("--file=") }
+            val canExecOrWrite = args.any {
+                "system(" in it || "getline" in it || ">" in it || "|" in it
             }
-            return finishAllowOrEnvAsk(hasRiskyEnv, "awk 文本过滤")
+            if (hasScriptFile || canExecOrWrite) {
+                return PolicyEvaluation(PolicyDecision.ASK, "awk 包含写文件、管道或外部调用需确认", false)
+            }
+            return finishAllowOrEnvAsk(hasRiskyEnv, "awk 只读文本过滤")
         }
 
         if (cmd == "sqlite3") {
             val readOnly = args.any { it == "-readonly" || it == "--readonly" }
-            if (readOnly) {
+            val dangerousDotCmd = args.any {
+                val lower = it.lowercase()
+                ".output" in lower || ".once" in lower || ".backup" in lower ||
+                    ".restore" in lower || ".shell" in lower || ".system" in lower || ".import" in lower
+            }
+            if (readOnly && !dangerousDotCmd) {
                 return finishAllowOrEnvAsk(hasRiskyEnv, "sqlite3 -readonly 查询")
             }
             return PolicyEvaluation(
                 PolicyDecision.ASK,
-                "非只读 sqlite3 访问需确认（只读查询请附带 -readonly 参数）",
+                "非只读或带导出指令的 sqlite3 访问需确认",
                 canRememberInSession = false,
             )
         }
@@ -604,6 +704,163 @@ object ShellPolicyEngine {
             reason = "执行状态修改或非常规命令 ($cmd) 需确认",
             canRememberInSession = cmd !in ALWAYS_SINGLE_APPROVAL_BINARIES,
         )
+    }
+
+    private fun extractSedScripts(args: List<String>): List<String> {
+        val scripts = mutableListOf<String>()
+        var endOpts = false
+        var i = 0
+        var hasExplicitExpr = false
+        val positional = mutableListOf<String>()
+        while (i < args.size) {
+            val a = args[i]
+            if (!endOpts) {
+                when {
+                    a == "--" -> {
+                        endOpts = true
+                        i++
+                        continue
+                    }
+                    a == "-e" || a == "--expression" -> {
+                        hasExplicitExpr = true
+                        if (i + 1 < args.size) scripts += args[i + 1]
+                        i += 2
+                        continue
+                    }
+                    a.startsWith("-e") && a.length > 2 -> {
+                        hasExplicitExpr = true
+                        scripts += a.substring(2)
+                        i++
+                        continue
+                    }
+                    a.startsWith("--expression=") -> {
+                        hasExplicitExpr = true
+                        scripts += a.removePrefix("--expression=")
+                        i++
+                        continue
+                    }
+                    a.startsWith("-") -> {
+                        i++
+                        continue
+                    }
+                }
+            }
+            positional += a
+            i++
+        }
+        if (!hasExplicitExpr && positional.isNotEmpty()) {
+            scripts += positional.first()
+        }
+        return scripts
+    }
+
+    /**
+     * 精确扫描 sed 脚本中的命令字与 `s///` 标志位，拦截 `w`/`W`（写文件）与 `e`（执行外部命令），
+     * 同时避免将替换文本中的普通字母 `w`/`e` 误判。
+     */
+    private fun hasMutatingSedCommand(rawScript: String): Boolean {
+        val s = stripOuterQuotes(rawScript)
+        var i = 0
+        while (i < s.length) {
+            while (i < s.length && (s[i].isWhitespace() || s[i] in ";{}!0123456789$,~+")) {
+                i++
+            }
+            if (i >= s.length) break
+
+            // 跳过 /regex/ 或 \c...\c 地址范围
+            if (s[i] == '/') {
+                i = skipDelimited(s, i + 1, '/')
+                continue
+            }
+            if (s[i] == '\\' && i + 1 < s.length) {
+                val delim = s[i + 1]
+                i = skipDelimited(s, i + 2, delim)
+                continue
+            }
+
+            when (val cmdChar = s[i]) {
+                '#' -> {
+                    while (i < s.length && s[i] != '\n') i++
+                }
+                'w', 'W', 'e' -> return true
+                's' -> {
+                    if (i + 1 >= s.length) return true
+                    val delim = s[i + 1]
+                    val afterPattern = skipDelimited(s, i + 2, delim)
+                    val afterReplacement = skipDelimited(s, afterPattern, delim)
+                    var f = afterReplacement
+                    while (f < s.length && s[f] != ';' && s[f] != '\n' && s[f] != '}') {
+                        if (s[f] == 'w' || s[f] == 'W' || s[f] == 'e') return true
+                        f++
+                    }
+                    i = f
+                }
+                'y' -> {
+                    if (i + 1 >= s.length) return true
+                    val delim = s[i + 1]
+                    val afterSrc = skipDelimited(s, i + 2, delim)
+                    i = skipDelimited(s, afterSrc, delim)
+                }
+                'a', 'i', 'c', 'r', 'R', 'b', 't', 'T', ':' -> {
+                    // 带文本或标签参数的命令，跳至行尾或分号
+                    while (i < s.length && s[i] != '\n' && s[i] != ';') i++
+                }
+                else -> {
+                    if (!cmdChar.isLetter() && cmdChar != '=') return true
+                    i++
+                }
+            }
+        }
+        return false
+    }
+
+    private fun skipDelimited(s: String, startIdx: Int, delim: Char): Int {
+        var i = startIdx
+        while (i < s.length) {
+            if (s[i] == '\\' && i + 1 < s.length) {
+                i += 2
+                continue
+            }
+            if (s[i] == delim) {
+                return i + 1
+            }
+            i++
+        }
+        return s.length
+    }
+
+    private fun stripOuterQuotes(s: String): String =
+        if (s.length >= 2 && ((s.first() == '\'' && s.last() == '\'') || (s.first() == '"' && s.last() == '"'))) {
+            s.substring(1, s.length - 1)
+        } else {
+            s
+        }
+
+    private fun collectPositionalArgs(args: List<String>, flagsWithValue: Set<String>): List<String> {
+        val result = mutableListOf<String>()
+        var endOpts = false
+        var i = 0
+        while (i < args.size) {
+            val a = args[i]
+            if (!endOpts) {
+                if (a == "--") {
+                    endOpts = true
+                    i++
+                    continue
+                }
+                if (a in flagsWithValue) {
+                    i += 2
+                    continue
+                }
+                if (a.startsWith("-") && a != "-") {
+                    i++
+                    continue
+                }
+            }
+            result += a
+            i++
+        }
+        return result
     }
 
     private fun finishAllowOrEnvAsk(hasRiskyEnv: Boolean, okReason: String): PolicyEvaluation =
@@ -800,7 +1057,6 @@ object ShellPolicyEngine {
                     }
                 }
                 else -> {
-                    // 忽略行尾安全重定向如 2>/dev/null 或 2>&1
                     cur.append(c)
                     hasTokenChar = true
                 }

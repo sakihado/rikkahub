@@ -44,9 +44,8 @@ import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.phoneuse.HostBackendType
-import me.rerere.rikkahub.phoneuse.HostShellExecutor
+import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
-import me.rerere.rikkahub.phoneuse.RootPhoneController
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
@@ -114,12 +113,11 @@ private fun AssistantLocalToolContent(
     val navController = LocalNavController.current
     val settingsStore: SettingsStore = koinInject()
     val phoneUseManager: PhoneUseManager = koinInject()
-    val hostShellExecutor: HostShellExecutor = koinInject()
-    val rootPhoneController: RootPhoneController = koinInject()
+    val hostPrivilegeManager: HostPrivilegeManager = koinInject()
 
     val phoneUseServiceOn = phoneUseManager.controller.collectAsStateWithLifecycle().value != null
     val isRootBacked by phoneUseManager.isRootBacked.collectAsStateWithLifecycle()
-    val backendState by hostShellExecutor.backendState.collectAsStateWithLifecycle()
+    val backendState by hostPrivilegeManager.backendState.collectAsStateWithLifecycle()
 
     val permissionRequiredText =
         stringResource(R.string.assistant_page_local_tools_screen_time_permission_required)
@@ -166,11 +164,9 @@ private fun AssistantLocalToolContent(
         }
         if (enabled && option == LocalToolOption.PhoneUse && !isRootBacked) {
             scope.launch {
-                val granted = hostShellExecutor.ensurePrivilegedAccess(interactive = true)
+                val granted = hostPrivilegeManager.ensurePrivilegedAccess(interactive = true)
                 if (granted) {
-                    hostShellExecutor.ensureStorageAccess(context.packageName)
-                    phoneUseManager.attachRoot(rootPhoneController)
-                    val label = backendDisplayName(hostShellExecutor.backendState.value)
+                    val label = backendDisplayName(hostPrivilegeManager.backendState.value)
                     toaster.show(
                         message = context.getString(R.string.assistant_page_local_tools_phone_use_root_ready, label),
                         type = ToastType.Success,
@@ -184,13 +180,7 @@ private fun AssistantLocalToolContent(
         }
         if (enabled && option == LocalToolOption.AndroidShell) {
             scope.launch {
-                val granted = hostShellExecutor.ensurePrivilegedAccess(interactive = true)
-                if (granted) {
-                    hostShellExecutor.ensureStorageAccess(context.packageName)
-                    if (PhoneUseManager.isSupported) {
-                        phoneUseManager.attachRoot(rootPhoneController)
-                    }
-                }
+                hostPrivilegeManager.ensurePrivilegedAccess(interactive = true)
             }
         }
         if (enabled && option == LocalToolOption.ScreenTime && !context.hasUsageStatsPermission()) {

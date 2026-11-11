@@ -14,6 +14,7 @@ import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PolicyDecision
+import me.rerere.rikkahub.phoneuse.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.ShellPolicyEngine
 import java.io.File
 import kotlin.uuid.Uuid
@@ -25,6 +26,7 @@ private const val INLINE_PREVIEW_CHARS = 4 * 1024
 
 internal fun buildAndroidShellTool(
     executor: HostShellExecutor,
+    approvalStore: ShellApprovalStore,
     toolOutputsDir: File,
 ): Tool = Tool(
     name = ANDROID_SHELL_TOOL_NAME,
@@ -60,7 +62,7 @@ internal fun buildAndroidShellTool(
         )
     },
     needsApproval = { input ->
-        shouldRequireApproval(input, executor)
+        shouldRequireApproval(input, approvalStore)
     },
     execute = { input ->
         val params = input.jsonObject
@@ -84,7 +86,7 @@ internal fun buildAndroidShellTool(
 
         // 若该命令刚经过用户点击允许，且属于可会话复用的非破坏性命令，记录到本会话缓存
         if (policy.decision == PolicyDecision.ASK && policy.canRememberInSession) {
-            executor.recordSessionApproval(command, asRoot)
+            approvalStore.recordApproval(command, asRoot)
         }
 
         val result = executor.execute(
@@ -130,7 +132,7 @@ internal fun buildAndroidShellTool(
     },
 )
 
-private fun shouldRequireApproval(input: JsonElement, executor: HostShellExecutor): Boolean {
+private fun shouldRequireApproval(input: JsonElement, approvalStore: ShellApprovalStore): Boolean {
     val params = runCatching { input.jsonObject }.getOrNull() ?: return true
     val command = params.optString("command")?.trim().orEmpty()
     if (command.isEmpty()) return false
@@ -142,7 +144,7 @@ private fun shouldRequireApproval(input: JsonElement, executor: HostShellExecuto
         // DENY 命令无需弹审批框让用户误点，直接放进 execute 里立即返回硬拦截报错
         PolicyDecision.DENY -> false
         PolicyDecision.ASK -> {
-            if (policy.canRememberInSession && executor.hasSessionApproval(command, asRoot)) {
+            if (policy.canRememberInSession && approvalStore.hasApproval(command, asRoot)) {
                 false
             } else {
                 true

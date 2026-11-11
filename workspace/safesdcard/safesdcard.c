@@ -1,21 +1,29 @@
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1 << 0)
+#endif
 
 /*
  * libsafesdcard.so — PRoot 沙盒内的 /sdcard 防误删保护层 (LD_PRELOAD)
  *
  * 拦截 unlink / unlinkat / rmdir / remove：
  * - /workspace、/tmp 等沙盒目录原样透传；
- * - /sdcard (/storage/emulated/0) 下的文件/目录禁止直接物理删除，自动原子移入 /sdcard/.Trash-RikkaHub/ 回收站；
+ * - /sdcard (/storage/emulated/0) 下的文件/空目录禁止直接物理抹除，自动以无覆盖唯一名移入 /sdcard/.Trash-RikkaHub/；
+ * - 严格保留 POSIX 错误码语义（EISDIR / ENOTDIR / ENOTEMPTY / ENOENT）；
  * - 禁止删除 /sdcard/.Trash-RikkaHub 内的回收站文件 (EPERM)。
  */
 
@@ -25,6 +33,8 @@ typedef int (*unlink_fn)(const char *);
 typedef int (*unlinkat_fn)(int, const char *, int);
 typedef int (*rmdir_fn)(const char *);
 typedef int (*remove_fn)(const char *);
+
+static atomic_ulong g_trash_seq = 0;
 
 static int is_sdcard_path(const char *resolved) {
     if (!resolved) return 0;
@@ -44,6 +54,21 @@ static int is_inside_trash(const char *resolved) {
         return 1;
     }
     return 0;
+}
+
+static int is_dir_non_empty(const char *path) {
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+    struct dirent *ent;
+    int has_entry = 0;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0) {
+            has_entry = 1;
+            break;
+        }
+    }
+    closedir(dir);
+    return has_entry;
 }
 
 static int resolve_at_path(int dirfd, const char *pathname, char *out, size_t out_sz) {
@@ -98,7 +123,8 @@ static int resolve_at_path(int dirfd, const char *pathname, char *out, size_t ou
     return 0;
 }
 
-static int move_to_trash(const char *resolved_path) {
+/* mode: 0 = unlink (files/symlinks only), 1 = rmdir (empty dirs only), 2 = remove (file or empty dir) */
+static int move_to_trash(const char *resolved_path, int mode) {
     if (strcmp(resolved_path, "/sdcard") == 0 ||
         strcmp(resolved_path, "/storage/emulated/0") == 0 ||
         is_inside_trash(resolved_path)) {
@@ -111,6 +137,19 @@ static int move_to_trash(const char *resolved_path) {
         return -1;
     }
 
+    if (mode == 0 && S_ISDIR(st.st_mode)) {
+        errno = EISDIR;
+        return -1;
+    }
+    if (mode == 1 && !S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    if (S_ISDIR(st.st_mode) && is_dir_non_empty(resolved_path)) {
+        errno = ENOTEMPTY;
+        return -1;
+    }
+
     mkdir(TRASH_DIR, 0775);
 
     const char *base = strrchr(resolved_path, '/');
@@ -118,20 +157,39 @@ static int move_to_trash(const char *resolved_path) {
 
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
+    pid_t pid = getpid();
 
-    char dest[PATH_MAX];
-    snprintf(
-        dest,
-        sizeof(dest),
-        "%s/%lld_%d_%s",
-        TRASH_DIR,
-        (long long)ts.tv_sec,
-        (int)(ts.tv_nsec % 100000),
-        base
-    );
+    for (int attempt = 0; attempt < 64; attempt++) {
+        unsigned long seq = atomic_fetch_add(&g_trash_seq, 1UL) + 1UL;
+        char dest[PATH_MAX];
+        snprintf(
+            dest,
+            sizeof(dest),
+            "%s/%lld_%09ld_%d_%lu_%s",
+            TRASH_DIR,
+            (long long)ts.tv_sec,
+            ts.tv_nsec,
+            (int)pid,
+            seq,
+            base
+        );
 
-    if (rename(resolved_path, dest) == 0) {
-        return 0;
+#ifdef SYS_renameat2
+        if (syscall(SYS_renameat2, AT_FDCWD, resolved_path, AT_FDCWD, dest, RENAME_NOREPLACE) == 0) {
+            return 0;
+        }
+        if (errno == EEXIST) {
+            continue;
+        }
+#endif
+        struct stat dst_st;
+        if (lstat(dest, &dst_st) == 0) {
+            continue;
+        }
+        if (rename(resolved_path, dest) == 0) {
+            return 0;
+        }
+        break;
     }
     errno = EPERM;
     return -1;
@@ -146,7 +204,7 @@ int unlink(const char *pathname) {
     char resolved[PATH_MAX];
     if (resolve_at_path(AT_FDCWD, pathname, resolved, sizeof(resolved)) == 0 &&
         is_sdcard_path(resolved)) {
-        return move_to_trash(resolved);
+        return move_to_trash(resolved, 0);
     }
     return real_unlink ? real_unlink(pathname) : -1;
 }
@@ -160,7 +218,8 @@ int unlinkat(int dirfd, const char *pathname, int flags) {
     char resolved[PATH_MAX];
     if (resolve_at_path(dirfd, pathname, resolved, sizeof(resolved)) == 0 &&
         is_sdcard_path(resolved)) {
-        return move_to_trash(resolved);
+        int mode = (flags & AT_REMOVEDIR) ? 1 : 0;
+        return move_to_trash(resolved, mode);
     }
     return real_unlinkat ? real_unlinkat(dirfd, pathname, flags) : -1;
 }
@@ -174,7 +233,7 @@ int rmdir(const char *pathname) {
     char resolved[PATH_MAX];
     if (resolve_at_path(AT_FDCWD, pathname, resolved, sizeof(resolved)) == 0 &&
         is_sdcard_path(resolved)) {
-        return move_to_trash(resolved);
+        return move_to_trash(resolved, 1);
     }
     return real_rmdir ? real_rmdir(pathname) : -1;
 }
@@ -188,7 +247,7 @@ int remove(const char *pathname) {
     char resolved[PATH_MAX];
     if (resolve_at_path(AT_FDCWD, pathname, resolved, sizeof(resolved)) == 0 &&
         is_sdcard_path(resolved)) {
-        return move_to_trash(resolved);
+        return move_to_trash(resolved, 2);
     }
     return real_remove ? real_remove(pathname) : -1;
 }

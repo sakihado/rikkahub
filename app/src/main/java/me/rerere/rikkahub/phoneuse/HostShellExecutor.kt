@@ -1,64 +1,25 @@
 package me.rerere.rikkahub.phoneuse
 
 import android.content.Context
-import android.content.pm.PackageManager
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import me.rerere.rikkahub.BuildConfig
 import moe.shizuku.server.IRemoteProcess
 import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
-import rikka.sui.Sui
 import java.io.ByteArrayOutputStream
+import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
-import java.util.Collections
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.resume
 
 private const val TAG = "HostShellExecutor"
-
-/**
- * 宿主机特权后端类型（按 **Sui / Shizuku 优先 -> su 兜底** 自动协商）
- */
-enum class HostBackendType {
-    /** 尚未探测 */
-    UNKNOWN,
-
-    /** Zygisk-Sui 或 Root 启动的 Shizuku（服务端 UID 0，支持 Binder 极速输入 + UID 2000 降权 + UID 0） */
-    SUI_ROOT,
-
-    /** 无线调试 / ADB 启动的 Shizuku（服务端 UID 2000，支持 Binder 极速输入 + UID 2000，无 Root） */
-    SHIZUKU_SHELL,
-
-    /** 传统 su 守护进程（Magisk / KernelSU / APatch，无 Sui/Shizuku 时的兜底） */
-    SU_ROOT,
-
-    /** 无特权或用户已拒绝授权，仅普通 App 沙盒 */
-    UNPRIVILEGED;
-
-    val isPrivileged: Boolean
-        get() = this == SUI_ROOT || this == SHIZUKU_SHELL || this == SU_ROOT
-
-    val usesShizukuBinder: Boolean
-        get() = this == SUI_ROOT || this == SHIZUKU_SHELL
-
-    val supportsUid0: Boolean
-        get() = this == SUI_ROOT || this == SU_ROOT
-}
 
 data class HostShellResult(
     val exitCode: Int,
@@ -73,175 +34,48 @@ data class HostShellResult(
 }
 
 /**
- * 统一宿主机命令与特权通道执行器（**Sui / Shizuku 第一优先 + Magisk/KSU `su` 兜底**）
+ * 统一宿主机命令进程执行与取消器（职责收敛：专职命令派发、身份隔离契约与整棵子进程树生命周期清理）。
  *
- * 1. **Sui / Shizuku 优先**：
- *    - 若检测到 Sui 或运行中的 Shizuku，全程通过常驻 Binder `IShizukuService.newProcess` 派发进程，
- *      完全不触发 Magisk `su` 弹窗，也不刷 Magisk 超级用户日志。
- *    - 当服务端为 UID 0（Zygisk-Sui）且 [asRoot] = false 时，通过内置原生 `libshelldrop.so` 在 0.1ms 内
- *      于内核层切换至 `UID 2000 (shell)` + `u:r:shell:s0` SELinux 上下文，严格维持最小权限隔离。
- * 2. **传统 `su` 无缝兜底**：
- *    - 仅当设备未安装/未运行 Sui 与 Shizuku（或在 Sui 面板中对本应用隐藏）时，自动回退 `su` / `su 2000`。
- * 3. **单次弹窗、持久静默重连**：
- *    - 首次按需触发唯一一次授权框；授权后后续冷启动自动静默挂载，0 弹窗打扰。
+ * 安全与可靠性保证：
+ * 1. **严格身份契约（Fail-Closed）**：
+ *    当 `asRoot == false` 时，绝不在 `libshelldrop.so` 或 `su 2000` 降权失败时静默退回 `UID 0` 执行；
+ *    若无法降权至 `UID 2000`，立即返回退出码 126 并要求显式传 `root=true` 走 Root 审批。
+ * 2. **进程组 + Lifeline 管道零残留清理**：
+ *    优先通过内置 `libshelldrop.so --lifeline-stdin` 为每次命令创建独立进程组 (`setpgid`)，
+ *    当客户端超时或点击「停止生成」断开 lifeline 管道时，守护父进程在毫秒级向 `-child_pgid` 发送 `SIGKILL`，
+ *    彻底杜绝后台孙进程逃逸。即使在无 `libshelldrop` 的兜底路径下，也先采集并清理后代进程树再销毁外层进程。
  */
 class HostShellExecutor(
     private val context: Context? = null,
+    val privilegeManager: HostPrivilegeManager = HostPrivilegeManager(context),
 ) {
-    private val _backendState = MutableStateFlow(HostBackendType.UNKNOWN)
-    val backendState: StateFlow<HostBackendType> = _backendState.asStateFlow()
+    val backendState: StateFlow<HostBackendType>
+        get() = privilegeManager.backendState
 
-    private val authMutex = Mutex()
-    private val listenersRegistered = AtomicBoolean(false)
-    private val permissionReqSeq = AtomicInteger(20260)
+    val canUseBinderFastInput: Boolean
+        get() = privilegeManager.canUseBinderFastInput
 
-    /** 当前进程生命周期内用户已审批通过的可复用命令集合 */
-    private val sessionApprovedKeys: MutableSet<String> = Collections.synchronizedSet(LinkedHashSet())
+    private val shellDropProbeMutex = Mutex()
 
     @Volatile
-    private var suBinaryPath: String? = null
+    private var verifiedShizukuSupervisorPath: String? = null
 
     @Volatile
-    private var supportsSuUid2000: Boolean? = null
+    private var shizukuSupervisorProbed: Boolean = false
 
     @Volatile
-    private var verifiedShellDropPath: String? = null
+    private var verifiedSuSupervisorPath: String? = null
 
     @Volatile
-    private var shellDropProbed: Boolean = false
+    private var suSupervisorProbed: Boolean = false
 
-    @Volatile
-    private var onBackendChangedCallback: ((HostBackendType) -> Unit)? = null
-
-    private val suAuthorizedMarker: File?
-        get() = context?.filesDir?.let { File(it, "host_bridge/su_authorized") }
-
-    private val shellDropBinary: File?
+    private val nativeShellDropBinary: File?
         get() = context?.applicationInfo?.nativeLibraryDir
             ?.let { File(it, "libshelldrop.so") }
             ?.takeIf { it.exists() && it.canExecute() }
 
-    val canUseBinderFastInput: Boolean
-        get() = _backendState.value.usesShizukuBinder && isShizukuBinderReadyAndGranted()
-
-    fun hasSessionApproval(command: String, asRoot: Boolean): Boolean =
-        approvalKey(command, asRoot) in sessionApprovedKeys
-
-    fun recordSessionApproval(command: String, asRoot: Boolean) {
-        sessionApprovedKeys += approvalKey(command, asRoot)
-    }
-
-    private fun approvalKey(command: String, asRoot: Boolean): String =
-        "${if (asRoot) "root" else "shell"}:${command.trim()}"
-
-    /**
-     * 注册 Shizuku / Sui Binder 生命周期监听，并在已获授权时静默完成连接（绝不在冷启动主动弹窗）。
-     */
-    suspend fun initializeOnStartup(onBackendReady: (HostBackendType) -> Unit) {
-        if (BuildConfig.IS_PLAY_STORE) return
-        onBackendChangedCallback = onBackendReady
-        registerShizukuListenersOnce()
-
-        // 兜底触发一次 Sui.init（正常情况下 ShizukuProvider.onCreate 已自动执行）
-        val pkg = context?.packageName
-        if (pkg != null && !isShizukuBinderAlive()) {
-            runCatching { Sui.init(pkg) }
-        }
-
-        // 1. 若 Sui / Shizuku 在线且之前已点过允许，直接 0 弹窗激活
-        if (isShizukuBinderReadyAndGranted()) {
-            val resolved = resolveGrantedShizukuType()
-            updateBackendState(resolved)
-            return
-        }
-
-        // 2. 若 Sui / Shizuku 在线但尚未授权：等待用户开开关或首次用工具时再弹 Sui 框，切勿此时去碰 su！
-        if (isShizukuBinderAlive()) {
-            return
-        }
-
-        // 3. 设备未运行 Sui / Shizuku，且此前已经给过 Magisk su 授权：冷启动静默恢复 su 通道
-        if (suAuthorizedMarker?.exists() == true && hasSuBinaryOnDevice()) {
-            if (probeSuAccessInternal()) {
-                updateBackendState(HostBackendType.SU_ROOT)
-            }
-        }
-    }
-
-    /**
-     * 确保特权通道就绪。
-     * @param interactive 为 true 时允许弹出系统授权框（严格遵循 Sui/Shizuku 优先，绝不连弹两个窗）。
-     */
-    suspend fun ensurePrivilegedAccess(interactive: Boolean = true): Boolean = authMutex.withLock {
-        if (BuildConfig.IS_PLAY_STORE) return@withLock false
-        registerShizukuListenersOnce()
-
-        val pkg = context?.packageName
-        if (pkg != null && !isShizukuBinderAlive()) {
-            runCatching { Sui.init(pkg) }
-        }
-
-        // 优先级 1：Sui / Shizuku Binder
-        if (isShizukuBinderAlive()) {
-            if (isShizukuBinderReadyAndGranted()) {
-                val resolved = resolveGrantedShizukuType()
-                updateBackendState(resolved)
-                return@withLock true
-            }
-            if (!interactive) {
-                return@withLock false
-            }
-            val granted = requestShizukuPermissionSuspend()
-            return@withLock if (granted && isShizukuBinderReadyAndGranted()) {
-                val resolved = resolveGrantedShizukuType()
-                updateBackendState(resolved)
-                true
-            } else {
-                // 用户在 Sui / Shizuku 弹窗点了拒绝时尊重选择，不紧接着弹第二次 Magisk 窗骚扰用户
-                updateBackendState(HostBackendType.UNPRIVILEGED)
-                false
-            }
-        }
-
-        // 优先级 2：Sui / Shizuku 不存在或未运行时，回退传统 su
-        if (_backendState.value == HostBackendType.SU_ROOT && suBinaryPath != null) {
-            return@withLock true
-        }
-        if (!hasSuBinaryOnDevice()) {
-            updateBackendState(HostBackendType.UNPRIVILEGED)
-            return@withLock false
-        }
-        if (!interactive && suAuthorizedMarker?.exists() != true) {
-            return@withLock false
-        }
-        val suGranted = probeSuAccessInternal()
-        if (suGranted) {
-            updateBackendState(HostBackendType.SU_ROOT)
-            return@withLock true
-        }
-        updateBackendState(HostBackendType.UNPRIVILEGED)
-        return@withLock false
-    }
-
-    /**
-     * 通过当前已授权的 Sui / Shizuku (UID 0 或 2000) 或 Root `su` 自动授予 `/sdcard` 访问权限，
-     * 省去手动跳系统设置开启「所有文件访问权限」。
-     */
-    suspend fun ensureStorageAccess(packageName: String) {
-        if (!_backendState.value.isPrivileged) return
-        withContext(Dispatchers.IO) {
-            runCatching {
-                execute(
-                    command = "appops set $packageName MANAGE_EXTERNAL_STORAGE allow 2>/dev/null; " +
-                        "pm grant $packageName android.permission.READ_EXTERNAL_STORAGE 2>/dev/null; " +
-                        "pm grant $packageName android.permission.WRITE_EXTERNAL_STORAGE 2>/dev/null",
-                    asRoot = false,
-                    timeoutMs = 5_000L,
-                    maxStdoutBytes = 512,
-                )
-            }
-        }
-    }
+    suspend fun ensurePrivilegedAccess(interactive: Boolean = true): Boolean =
+        privilegeManager.ensurePrivilegedAccess(interactive)
 
     suspend fun execute(
         command: String,
@@ -249,102 +83,161 @@ class HostShellExecutor(
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         maxStdoutBytes: Int = MAX_CAPTURE_BYTES,
     ): HostShellResult = withContext(Dispatchers.IO) {
-        if (!_backendState.value.isPrivileged) {
-            ensurePrivilegedAccess(interactive = true)
+        if (!backendState.value.isPrivileged) {
+            privilegeManager.ensurePrivilegedAccess(interactive = true)
         }
 
         val wrappedScript = buildAndroidEnvScript(command)
         val clampedTimeout = timeoutMs.coerceIn(500L, MAX_TIMEOUT_MS)
 
-        when (_backendState.value) {
-            HostBackendType.SUI_ROOT -> {
-                if (asRoot) {
-                    executeViaShizuku(
-                        cmdArgs = arrayOf("/system/bin/sh", "-c", wrappedScript),
-                        timeoutMs = clampedTimeout,
-                        maxStdoutBytes = maxStdoutBytes,
-                    ).copy(effectiveIdentity = "sui-root (uid=0)")
-                } else {
-                    val dropPath = getVerifiedShellDropViaShizuku()
-                    if (dropPath != null) {
-                        executeViaShizuku(
-                            cmdArgs = arrayOf(dropPath, "-c", wrappedScript),
-                            timeoutMs = clampedTimeout,
-                            maxStdoutBytes = maxStdoutBytes,
-                        ).copy(effectiveIdentity = "sui-shell (uid=2000)")
-                    } else {
-                        executeViaShizuku(
-                            cmdArgs = arrayOf("/system/bin/sh", "-c", wrappedScript),
-                            timeoutMs = clampedTimeout,
-                            maxStdoutBytes = maxStdoutBytes,
-                        ).copy(effectiveIdentity = "sui (uid=0-fallback)")
-                    }
-                }
-            }
-
-            HostBackendType.SHIZUKU_SHELL -> {
-                if (asRoot) {
-                    // 纯 ADB Shizuku 本身只有 UID 2000；若设备同时有 su，允许显式 root=true 请求回退 su 提权
-                    if (hasSuBinaryOnDevice() && probeSuAccessInternal()) {
-                        val su = suBinaryPath!!
-                        runLocalProcess(
-                            commandArgs = listOf(su, "-c", wrappedScript),
-                            timeoutMs = clampedTimeout,
-                            maxStdoutBytes = maxStdoutBytes,
-                            killAsSu = true,
-                        ).copy(effectiveIdentity = "su-root (uid=0)")
-                    } else {
-                        HostShellResult(
-                            exitCode = 126,
-                            stdoutBytes = ByteArray(0),
-                            stderrBytes = "Current backend is Shizuku (UID 2000 ADB shell); UID 0 root commands are unavailable without Root/Sui."
-                                .toByteArray(Charsets.UTF_8),
-                            effectiveIdentity = "shizuku-shell (uid=2000)",
-                        )
-                    }
-                } else {
-                    executeViaShizuku(
-                        cmdArgs = arrayOf("/system/bin/sh", "-c", wrappedScript),
-                        timeoutMs = clampedTimeout,
-                        maxStdoutBytes = maxStdoutBytes,
-                    ).copy(effectiveIdentity = "shizuku-shell (uid=2000)")
-                }
-            }
-
-            HostBackendType.SU_ROOT -> {
-                val su = suBinaryPath
-                if (su != null) {
-                    val args: List<String>
-                    val label: String
-                    if (asRoot) {
-                        args = listOf(su, "-c", wrappedScript)
-                        label = "su-root (uid=0)"
-                    } else if (supportsSuUid2000 == true) {
-                        args = listOf(su, "2000", "-c", wrappedScript)
-                        label = "su-shell (uid=2000)"
-                    } else if (shellDropBinary != null) {
-                        args = listOf(su, "-c", "${shellDropBinary!!.absolutePath} -c ${shellSingleQuote(wrappedScript)}")
-                        label = "su-shell (uid=2000)"
-                    } else {
-                        args = listOf(su, "-c", wrappedScript)
-                        label = "su-root-fallback (uid=0)"
-                    }
-                    runLocalProcess(
-                        commandArgs = args,
-                        timeoutMs = clampedTimeout,
-                        maxStdoutBytes = maxStdoutBytes,
-                        killAsSu = true,
-                    ).copy(effectiveIdentity = label)
-                } else {
-                    executeUnprivileged(wrappedScript, asRoot, clampedTimeout, maxStdoutBytes)
-                }
-            }
-
+        when (backendState.value) {
+            HostBackendType.SUI_ROOT -> executeOnSuiRoot(wrappedScript, asRoot, clampedTimeout, maxStdoutBytes)
+            HostBackendType.SHIZUKU_SHELL -> executeOnShizukuShell(wrappedScript, asRoot, clampedTimeout, maxStdoutBytes)
+            HostBackendType.SU_ROOT -> executeOnSuRoot(wrappedScript, asRoot, clampedTimeout, maxStdoutBytes)
             HostBackendType.UNKNOWN, HostBackendType.UNPRIVILEGED -> {
                 executeUnprivileged(wrappedScript, asRoot, clampedTimeout, maxStdoutBytes)
             }
         }
     }
+
+    private suspend fun executeOnSuiRoot(
+        wrappedScript: String,
+        asRoot: Boolean,
+        timeoutMs: Long,
+        maxStdoutBytes: Int,
+    ): HostShellResult {
+        val supervisor = getVerifiedSupervisorViaShizuku()
+        if (asRoot) {
+            val args = if (supervisor != null) {
+                arrayOf(supervisor, "--keep-uid", "--lifeline-stdin", "-c", wrappedScript)
+            } else {
+                arrayOf("/system/bin/sh", "-c", buildLifelineFallbackScript(wrappedScript))
+            }
+            return executeViaShizuku(
+                cmdArgs = args,
+                keepStdinAsLifeline = true,
+                timeoutMs = timeoutMs,
+                maxStdoutBytes = maxStdoutBytes,
+            ).copy(effectiveIdentity = "sui-root (uid=0)")
+        }
+
+        // asRoot == false: 严格要求降权至 UID 2000，绝不静默退回 UID 0！
+        if (supervisor == null) {
+            return failClosedUid2000Unavailable("Sui backend could not verify UID 2000 privilege-drop helper (libshelldrop.so).")
+        }
+        return executeViaShizuku(
+            cmdArgs = arrayOf(supervisor, "--uid-shell", "--lifeline-stdin", "-c", wrappedScript),
+            keepStdinAsLifeline = true,
+            timeoutMs = timeoutMs,
+            maxStdoutBytes = maxStdoutBytes,
+        ).copy(effectiveIdentity = "sui-shell (uid=2000)")
+    }
+
+    private suspend fun executeOnShizukuShell(
+        wrappedScript: String,
+        asRoot: Boolean,
+        timeoutMs: Long,
+        maxStdoutBytes: Int,
+    ): HostShellResult {
+        if (asRoot) {
+            val su = privilegeManager.ensureSuForRootEscalation()
+            return if (su != null) {
+                executeWithSu(su, wrappedScript, asRoot = true, timeoutMs = timeoutMs, maxStdoutBytes = maxStdoutBytes)
+            } else {
+                HostShellResult(
+                    exitCode = 126,
+                    stdoutBytes = ByteArray(0),
+                    stderrBytes = "Current backend is Shizuku (UID 2000 ADB shell); UID 0 root commands are unavailable without Root/Sui."
+                        .toByteArray(Charsets.UTF_8),
+                    effectiveIdentity = "shizuku-shell (uid=2000)",
+                )
+            }
+        }
+
+        val supervisor = getVerifiedSupervisorViaShizuku()
+        val args = if (supervisor != null) {
+            arrayOf(supervisor, "--keep-uid", "--lifeline-stdin", "-c", wrappedScript)
+        } else {
+            arrayOf("/system/bin/sh", "-c", buildLifelineFallbackScript(wrappedScript))
+        }
+        return executeViaShizuku(
+            cmdArgs = args,
+            keepStdinAsLifeline = true,
+            timeoutMs = timeoutMs,
+            maxStdoutBytes = maxStdoutBytes,
+        ).copy(effectiveIdentity = "shizuku-shell (uid=2000)")
+    }
+
+    private suspend fun executeOnSuRoot(
+        wrappedScript: String,
+        asRoot: Boolean,
+        timeoutMs: Long,
+        maxStdoutBytes: Int,
+    ): HostShellResult {
+        val su = privilegeManager.suBinaryPath
+            ?: return executeUnprivileged(wrappedScript, asRoot, timeoutMs, maxStdoutBytes)
+        return executeWithSu(su, wrappedScript, asRoot, timeoutMs, maxStdoutBytes)
+    }
+
+    private suspend fun executeWithSu(
+        su: String,
+        wrappedScript: String,
+        asRoot: Boolean,
+        timeoutMs: Long,
+        maxStdoutBytes: Int,
+    ): HostShellResult {
+        val supervisor = getVerifiedSupervisorViaSu(su)
+        if (asRoot) {
+            val cmdStr = if (supervisor != null) {
+                "exec ${shellSingleQuote(supervisor)} --keep-uid --lifeline-stdin -c ${shellSingleQuote(wrappedScript)}"
+            } else {
+                buildLifelineFallbackScript(wrappedScript)
+            }
+            return runLocalProcess(
+                commandArgs = listOf(su, "-c", cmdStr),
+                keepStdinAsLifeline = true,
+                timeoutMs = timeoutMs,
+                maxStdoutBytes = maxStdoutBytes,
+                suPathForCleanup = su,
+            ).copy(effectiveIdentity = "su-root (uid=0)")
+        }
+
+        // asRoot == false: 优先用 libshelldrop 降权至 UID 2000 并建立独立进程组；其次用原生 `su 2000`；都不可用则明确报错
+        return when {
+            supervisor != null -> {
+                val cmdStr = "exec ${shellSingleQuote(supervisor)} --uid-shell --lifeline-stdin -c ${shellSingleQuote(wrappedScript)}"
+                runLocalProcess(
+                    commandArgs = listOf(su, "-c", cmdStr),
+                    keepStdinAsLifeline = true,
+                    timeoutMs = timeoutMs,
+                    maxStdoutBytes = maxStdoutBytes,
+                    suPathForCleanup = su,
+                ).copy(effectiveIdentity = "su-shell (uid=2000)")
+            }
+
+            privilegeManager.supportsSuUid2000 == true -> {
+                runLocalProcess(
+                    commandArgs = listOf(su, "2000", "-c", buildLifelineFallbackScript(wrappedScript)),
+                    keepStdinAsLifeline = true,
+                    timeoutMs = timeoutMs,
+                    maxStdoutBytes = maxStdoutBytes,
+                    suPathForCleanup = su,
+                ).copy(effectiveIdentity = "su-shell (uid=2000)")
+            }
+
+            else -> failClosedUid2000Unavailable("Current `su` binary cannot drop privileges to UID 2000 (shell).")
+        }
+    }
+
+    private fun failClosedUid2000Unavailable(detail: String): HostShellResult = HostShellResult(
+        exitCode = 126,
+        stdoutBytes = ByteArray(0),
+        stderrBytes = (
+            "$detail Refusing to silently escalate `root=false` command to UID 0. " +
+                "Pass `root=true` explicitly if root execution is intended so it undergoes root approval."
+            ).toByteArray(Charsets.UTF_8),
+        effectiveIdentity = "uid2000-unavailable",
+    )
 
     private suspend fun executeUnprivileged(
         wrappedScript: String,
@@ -362,128 +255,108 @@ class HostShellExecutor(
             )
         }
         val sh = if (File("/system/bin/sh").exists()) "/system/bin/sh" else "/bin/sh"
+        val supervisor = nativeShellDropBinary?.absolutePath
+        val args = if (supervisor != null) {
+            listOf(supervisor, "--keep-uid", "--lifeline-stdin", "-c", wrappedScript)
+        } else {
+            listOf(sh, "-c", buildLifelineFallbackScript(wrappedScript))
+        }
         return runLocalProcess(
-            commandArgs = listOf(sh, "-c", wrappedScript),
+            commandArgs = args,
+            keepStdinAsLifeline = true,
             timeoutMs = timeoutMs,
             maxStdoutBytes = maxStdoutBytes,
-            killAsSu = false,
+            suPathForCleanup = null,
         ).copy(effectiveIdentity = "app-sandbox")
     }
 
-    private fun registerShizukuListenersOnce() {
-        if (!listenersRegistered.compareAndSet(false, true)) return
-        runCatching {
-            Shizuku.addBinderReceivedListenerSticky {
-                if (isShizukuBinderReadyAndGranted()) {
-                    updateBackendState(resolveGrantedShizukuType())
-                }
-            }
-            Shizuku.addBinderDeadListener {
-                if (_backendState.value.usesShizukuBinder) {
-                    if (suBinaryPath != null) {
-                        updateBackendState(HostBackendType.SU_ROOT)
-                    } else {
-                        updateBackendState(HostBackendType.UNKNOWN)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun updateBackendState(newState: HostBackendType) {
-        val prev = _backendState.value
-        _backendState.value = newState
-        if (prev != newState) {
-            onBackendChangedCallback?.invoke(newState)
-        }
-    }
-
-    private fun isShizukuBinderAlive(): Boolean =
-        runCatching { Shizuku.pingBinder() }.getOrDefault(false)
-
-    private fun isShizukuBinderReadyAndGranted(): Boolean = runCatching {
-        Shizuku.pingBinder() && !Shizuku.isPreV11() &&
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-    }.getOrDefault(false)
-
-    private fun resolveGrantedShizukuType(): HostBackendType = runCatching {
-        if (Shizuku.getUid() == 0) HostBackendType.SUI_ROOT else HostBackendType.SHIZUKU_SHELL
-    }.getOrDefault(HostBackendType.SHIZUKU_SHELL)
-
-    private suspend fun requestShizukuPermissionSuspend(): Boolean {
-        if (!isShizukuBinderAlive()) return false
-        if (isShizukuBinderReadyAndGranted()) return true
-
-        val reqCode = permissionReqSeq.incrementAndGet()
-        return withTimeoutOrNull(25_000L) {
-            suspendCancellableCoroutine { cont ->
-                val listener = object : Shizuku.OnRequestPermissionResultListener {
-                    override fun onRequestPermissionResult(requestCode: Int, grantResult: Int) {
-                        if (requestCode == reqCode) {
-                            runCatching { Shizuku.removeRequestPermissionResultListener(this) }
-                            if (cont.isActive) {
-                                cont.resume(grantResult == PackageManager.PERMISSION_GRANTED)
-                            }
-                        }
-                    }
-                }
-                cont.invokeOnCancellation {
-                    runCatching { Shizuku.removeRequestPermissionResultListener(listener) }
-                }
-                runCatching {
-                    Shizuku.addRequestPermissionResultListener(listener)
-                    Shizuku.requestPermission(reqCode)
-                }.onFailure {
-                    runCatching { Shizuku.removeRequestPermissionResultListener(listener) }
-                    if (cont.isActive) cont.resume(false)
-                }
-            }
-        } ?: false
-    }
-
-    private suspend fun getVerifiedShellDropViaShizuku(): String? {
-        if (shellDropProbed) return verifiedShellDropPath
-        val bin = shellDropBinary ?: run {
-            shellDropProbed = true
-            return null
+    private suspend fun getVerifiedSupervisorViaShizuku(): String? = shellDropProbeMutex.withLock {
+        if (shizukuSupervisorProbed) return@withLock verifiedShizukuSupervisorPath
+        val bin = nativeShellDropBinary ?: run {
+            shizukuSupervisorProbed = true
+            return@withLock null
         }
 
-        // 优先直接执行 nativeLibraryDir 下的 libshelldrop.so
+        val expectFlag = if (backendState.value == HostBackendType.SUI_ROOT) "--uid-shell" else "--keep-uid"
         val directProbe = executeViaShizuku(
-            cmdArgs = arrayOf(bin.absolutePath, "-c", "id -u"),
+            cmdArgs = arrayOf(bin.absolutePath, expectFlag, "-c", "id -u"),
+            keepStdinAsLifeline = false,
             timeoutMs = 3_000L,
             maxStdoutBytes = 256,
         )
         if (!directProbe.timedOut && directProbe.exitCode == 0 && directProbe.stdout.trim() == "2000") {
-            verifiedShellDropPath = bin.absolutePath
-            shellDropProbed = true
-            return verifiedShellDropPath
+            verifiedShizukuSupervisorPath = bin.absolutePath
+            shizukuSupervisorProbed = true
+            return@withLock verifiedShizukuSupervisorPath
         }
 
-        // 个别严格 SELinux 策略限制执行 apk_data_file 时，自动拷贝至 /data/local/tmp 执行
         val stagedPath = "/data/local/tmp/.rikkahub_shelldrop_${context?.packageName.orEmpty().hashCode().toUInt()}"
         val stageProbe = executeViaShizuku(
             cmdArgs = arrayOf(
                 "/system/bin/sh",
                 "-c",
-                "cp ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod 755 $stagedPath && $stagedPath -c 'id -u'",
+                "cp -f ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod 755 $stagedPath && $stagedPath $expectFlag -c 'id -u'",
             ),
+            keepStdinAsLifeline = false,
             timeoutMs = 4_000L,
             maxStdoutBytes = 256,
         )
         if (!stageProbe.timedOut && stageProbe.exitCode == 0 && stageProbe.stdout.trim() == "2000") {
-            verifiedShellDropPath = stagedPath
-            shellDropProbed = true
-            return verifiedShellDropPath
+            verifiedShizukuSupervisorPath = stagedPath
+            shizukuSupervisorProbed = true
+            return@withLock verifiedShizukuSupervisorPath
         }
 
-        Log.w(TAG, "libshelldrop probe failed (exit=${stageProbe.exitCode}, err=${stageProbe.stderr})")
-        shellDropProbed = true
-        return null
+        Log.w(TAG, "Shizuku supervisor probe failed (exit=${stageProbe.exitCode}, err=${stageProbe.stderr})")
+        shizukuSupervisorProbed = true
+        return@withLock null
+    }
+
+    private suspend fun getVerifiedSupervisorViaSu(su: String): String? = shellDropProbeMutex.withLock {
+        if (suSupervisorProbed) return@withLock verifiedSuSupervisorPath
+        val bin = nativeShellDropBinary ?: run {
+            suSupervisorProbed = true
+            return@withLock null
+        }
+
+        val directProbe = runLocalProcess(
+            commandArgs = listOf(su, "-c", "${shellSingleQuote(bin.absolutePath)} --uid-shell -c 'id -u'"),
+            keepStdinAsLifeline = false,
+            timeoutMs = 4_000L,
+            maxStdoutBytes = 256,
+            suPathForCleanup = su,
+        )
+        if (!directProbe.timedOut && directProbe.exitCode == 0 && directProbe.stdout.trim() == "2000") {
+            verifiedSuSupervisorPath = bin.absolutePath
+            suSupervisorProbed = true
+            return@withLock verifiedSuSupervisorPath
+        }
+
+        val stagedPath = "/data/local/tmp/.rikkahub_shelldrop_${context?.packageName.orEmpty().hashCode().toUInt()}"
+        val stageProbe = runLocalProcess(
+            commandArgs = listOf(
+                su,
+                "-c",
+                "cp -f ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod 755 $stagedPath && $stagedPath --uid-shell -c 'id -u'",
+            ),
+            keepStdinAsLifeline = false,
+            timeoutMs = 4_000L,
+            maxStdoutBytes = 256,
+            suPathForCleanup = su,
+        )
+        if (!stageProbe.timedOut && stageProbe.exitCode == 0 && stageProbe.stdout.trim() == "2000") {
+            verifiedSuSupervisorPath = stagedPath
+            suSupervisorProbed = true
+            return@withLock verifiedSuSupervisorPath
+        }
+
+        suSupervisorProbed = true
+        return@withLock null
     }
 
     private suspend fun executeViaShizuku(
         cmdArgs: Array<String>,
+        keepStdinAsLifeline: Boolean,
         timeoutMs: Long,
         maxStdoutBytes: Int,
     ): HostShellResult = runInterruptible(Dispatchers.IO) {
@@ -504,10 +377,17 @@ class HostShellExecutor(
             )
         }
 
-        // 立即关闭远程进程 stdin，避免交互命令阻塞等待输入
-        runCatching {
-            remote.outputStream?.let { ParcelFileDescriptor.AutoCloseOutputStream(it).close() }
-        }
+        val lifelineHandle: Closeable? = runCatching {
+            remote.outputStream?.let { pfd ->
+                val out = ParcelFileDescriptor.AutoCloseOutputStream(pfd)
+                if (!keepStdinAsLifeline) {
+                    out.close()
+                    null
+                } else {
+                    out
+                }
+            }
+        }.getOrNull()
 
         val stdoutStream = runCatching {
             remote.inputStream?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
@@ -520,10 +400,19 @@ class HostShellExecutor(
         val stdoutCollector = ByteStreamCollector(stdoutStream, maxStdoutBytes)
         val stderrCollector = ByteStreamCollector(stderrStream, MAX_STDERR_BYTES)
 
+        fun abortRemoteTree() {
+            // 先断开 lifeline 管道，唤醒远端 libshelldrop 立即执行 kill(-child_pgid, SIGKILL)
+            runCatching { lifelineHandle?.close() }
+            runCatching { remote.waitForTimeout(150L, TimeUnit.MILLISECONDS.name) }
+            runCatching { remote.destroy() }
+        }
+
         try {
             val finished = remote.waitForTimeout(timeoutMs, TimeUnit.MILLISECONDS.name)
             if (!finished) {
-                runCatching { remote.destroy() }
+                abortRemoteTree()
+            } else {
+                runCatching { lifelineHandle?.close() }
             }
             stdoutCollector.join(1_000)
             stderrCollector.join(1_000)
@@ -536,61 +425,28 @@ class HostShellExecutor(
                 truncated = stdoutCollector.truncated || stderrCollector.truncated,
             )
         } catch (e: InterruptedException) {
-            runCatching { remote.destroy() }
+            abortRemoteTree()
             stdoutCollector.join(500)
             stderrCollector.join(500)
             throw e
         } catch (e: Throwable) {
-            runCatching { remote.destroy() }
+            abortRemoteTree()
             HostShellResult(
                 exitCode = 127,
                 stdoutBytes = stdoutCollector.bytes(),
                 stderrBytes = (e.message ?: "Shizuku process error").toByteArray(Charsets.UTF_8),
             )
+        } finally {
+            runCatching { lifelineHandle?.close() }
         }
     }
 
-    private suspend fun probeSuAccessInternal(): Boolean = withContext(Dispatchers.IO) {
-        val candidate = findSuBinary() ?: return@withContext false
-        val probe = runLocalProcess(
-            commandArgs = listOf(candidate, "-c", "id -u"),
-            timeoutMs = 15_000L,
-            maxStdoutBytes = 512,
-        )
-        val granted = !probe.timedOut && probe.exitCode == 0 && probe.stdout.trim() == "0"
-        if (granted) {
-            suBinaryPath = candidate
-            val shellProbe = runLocalProcess(
-                commandArgs = listOf(candidate, "2000", "-c", "id -u"),
-                timeoutMs = 5_000L,
-                maxStdoutBytes = 512,
-            )
-            supportsSuUid2000 = !shellProbe.timedOut && shellProbe.exitCode == 0 && shellProbe.stdout.trim() == "2000"
-            runCatching {
-                suAuthorizedMarker?.apply {
-                    parentFile?.mkdirs()
-                    writeText("1")
-                }
-            }
-        }
-        granted
-    }
-
-    fun hasSuBinaryOnDevice(): Boolean = findSuBinary() != null
-
-    private fun buildAndroidEnvScript(userCommand: String): String = buildString {
-        append("export PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:\$PATH; ")
-        append("export ANDROID_ROOT=\${ANDROID_ROOT:-/system}; ")
-        append("export ANDROID_DATA=\${ANDROID_DATA:-/data}; ")
-        append("export ANDROID_STORAGE=\${ANDROID_STORAGE:-/storage}; ")
-        append(userCommand)
-    }
-
-    private suspend fun runLocalProcess(
+    internal suspend fun runLocalProcess(
         commandArgs: List<String>,
+        keepStdinAsLifeline: Boolean,
         timeoutMs: Long,
         maxStdoutBytes: Int,
-        killAsSu: Boolean = false,
+        suPathForCleanup: String? = null,
     ): HostShellResult = runInterruptible(Dispatchers.IO) {
         val pb = ProcessBuilder(commandArgs).redirectErrorStream(false)
         val process = try {
@@ -603,29 +459,44 @@ class HostShellExecutor(
             )
         }
 
-        runCatching { process.outputStream.close() }
+        val lifelineStream = process.outputStream
+        if (!keepStdinAsLifeline) {
+            runCatching { lifelineStream.close() }
+        }
 
         val stdoutCollector = ByteStreamCollector(process.inputStream, maxStdoutBytes)
         val stderrCollector = ByteStreamCollector(process.errorStream, MAX_STDERR_BYTES)
 
         fun forceKillTree() {
-            val pid = getProcessPid(process)
-            process.destroyForcibly()
-            if (killAsSu && pid != null && suBinaryPath != null) {
-                runCatching {
-                    ProcessBuilder(
-                        suBinaryPath!!,
-                        "-c",
-                        "pkill -9 -P $pid 2>/dev/null; kill -9 -$pid $pid 2>/dev/null"
-                    ).start().waitFor(1500, TimeUnit.MILLISECONDS)
+            val rootPid = getProcessPid(process)
+            // 1. 先关闭 lifeline 管道，让 libshelldrop 或兜底监控器自行把进程组 SIGKILL 干净
+            runCatching { lifelineStream.close() }
+            if (runCatching { process.waitFor(150, TimeUnit.MILLISECONDS) }.getOrDefault(false)) {
+                return
+            }
+            // 2. 在销毁父进程之前（趁子进程尚未被 init 收养），自底向上递归收集并强杀整棵后代树！
+            if (rootPid != null) {
+                if (suPathForCleanup != null) {
+                    runCatching {
+                        ProcessBuilder(
+                            suPathForCleanup,
+                            "-c",
+                            buildRecursiveKillScript(rootPid),
+                        ).start().waitFor(1_500, TimeUnit.MILLISECONDS)
+                    }
+                } else {
+                    killLocalDescendantTree(rootPid)
                 }
             }
+            process.destroyForcibly()
         }
 
         try {
             val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             if (!finished) {
                 forceKillTree()
+            } else {
+                runCatching { lifelineStream.close() }
             }
             stdoutCollector.join(1_000)
             stderrCollector.join(1_000)
@@ -641,6 +512,45 @@ class HostShellExecutor(
             stdoutCollector.join(500)
             stderrCollector.join(500)
             throw e
+        } finally {
+            runCatching { lifelineStream.close() }
+        }
+    }
+
+    private fun buildAndroidEnvScript(userCommand: String): String = buildString {
+        append("export PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:\$PATH; ")
+        append("export ANDROID_ROOT=\${ANDROID_ROOT:-/system}; ")
+        append("export ANDROID_DATA=\${ANDROID_DATA:-/data}; ")
+        append("export ANDROID_STORAGE=\${ANDROID_STORAGE:-/storage}; ")
+        append(userCommand)
+    }
+
+    /**
+     * 当极少数环境无 `libshelldrop.so` 可用时（如纯 JVM 宿主测试或无 native 库环境），
+     * 使用纯 POSIX shell 建立 lifeline 监控，确保断开 stdin 时递归清理子进程树。
+     */
+    internal fun buildLifelineFallbackScript(innerScript: String): String =
+        "sh -c ${shellSingleQuote(innerScript)} </dev/null & " +
+            "__rk_child=\$!; " +
+            "( IFS= read -r _ || true; " +
+            "pkill -9 -P \$__rk_child 2>/dev/null; kill -9 \$__rk_child 2>/dev/null ) >/dev/null 2>&1 & " +
+            "__rk_watch=\$!; " +
+            "wait \$__rk_child; __rk_rc=\$?; " +
+            "kill -9 \$__rk_watch 2>/dev/null; exit \$__rk_rc"
+
+    private fun buildRecursiveKillScript(rootPid: Long): String =
+        "kill_tree() { " +
+            "local p=\$1; local c; " +
+            "for c in \$(pgrep -P \"\$p\" 2>/dev/null); do kill_tree \"\$c\"; done; " +
+            "kill -9 \"\$p\" 2>/dev/null; " +
+            "}; kill_tree $rootPid"
+
+    private fun killLocalDescendantTree(rootPid: Long) {
+        runCatching {
+            val sh = if (File("/system/bin/sh").exists()) "/system/bin/sh" else "/bin/sh"
+            ProcessBuilder(sh, "-c", buildRecursiveKillScript(rootPid))
+                .start()
+                .waitFor(1_000, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -653,27 +563,6 @@ class HostShellExecutor(
             (field.get(process) as? Number)?.toLong()
         }
     }.getOrNull()
-
-    private fun findSuBinary(): String? {
-        val knownPaths = listOf(
-            "/debug_ramdisk/su",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/vendor/bin/su",
-            "/su/bin/su",
-            "/magisk/.core/bin/su",
-        )
-        knownPaths.firstOrNull { File(it).exists() }?.let { return it }
-
-        val envPath = System.getenv("PATH").orEmpty().split(':')
-        for (dir in envPath) {
-            if (dir.isBlank()) continue
-            val f = File(dir, "su")
-            if (f.exists()) return f.absolutePath
-        }
-        return null
-    }
 
     companion object {
         const val DEFAULT_TIMEOUT_MS = 20_000L

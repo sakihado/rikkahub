@@ -69,7 +69,7 @@ class PhoneUseAccessibilityService : AccessibilityService(), PhoneController {
 
     // ---- 读取屏幕 ----
 
-    override fun visiblePackages(): Set<String> = targetRoots().packages()
+    override suspend fun visiblePackages(): Set<String> = targetRoots().packages()
 
     private fun List<AccessibilityNodeInfo>.packages(): Set<String> =
         mapNotNullTo(mutableSetOf()) { it.packageName?.toString() }
@@ -332,7 +332,7 @@ class PhoneUseAccessibilityService : AccessibilityService(), PhoneController {
     }
 
     // 开启了无障碍服务的应用可以从后台启动 Activity
-    override fun openApp(packageName: String): Boolean {
+    override suspend fun openApp(packageName: String): Boolean {
         val intent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
         startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         return true

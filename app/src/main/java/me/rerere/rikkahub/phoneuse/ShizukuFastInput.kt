@@ -9,12 +9,12 @@ import android.view.InputEvent
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
+import kotlinx.coroutines.delay
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuBinderWrapper
 import rikka.shizuku.SystemServiceHelper
 import java.lang.reflect.Method
-import kotlinx.coroutines.delay
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -81,24 +81,20 @@ object ShizukuFastInput {
         }.getOrDefault(false)
     }
 
-    fun injectTap(x: Float, y: Float): Boolean {
-        val downTime = SystemClock.uptimeMillis()
-        val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 1.0f)
-        val okDown = try {
-            injectEvent(down)
-        } finally {
-            down.recycle()
-        }
-        if (!okDown) return false
-
-        val upTime = SystemClock.uptimeMillis().coerceAtLeast(downTime + 12L)
-        val up = obtainTouchEvent(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0.0f)
-        return try {
-            injectEvent(up)
-        } finally {
-            up.recycle()
-        }
-    }
+    fun injectTap(x: Float, y: Float): Boolean =
+        runTapSequence(
+            nowMs = SystemClock::uptimeMillis,
+            sendTouch = { downTime, eventTime, action, px, py, pressure ->
+                val ev = obtainTouchEvent(downTime, eventTime, action, px, py, pressure)
+                try {
+                    injectEvent(ev)
+                } finally {
+                    ev.recycle()
+                }
+            },
+            x = x,
+            y = y,
+        )
 
     suspend fun injectGesture(
         fromX: Float,
@@ -106,47 +102,117 @@ object ShizukuFastInput {
         toX: Float,
         toY: Float,
         durationMs: Long,
+    ): Boolean =
+        runGestureSequence(
+            fromX = fromX,
+            fromY = fromY,
+            toX = toX,
+            toY = toY,
+            durationMs = durationMs,
+            nowMs = SystemClock::uptimeMillis,
+            sleepMs = { delay(it) },
+            sendTouch = { downTime, eventTime, action, px, py, pressure ->
+                val ev = obtainTouchEvent(downTime, eventTime, action, px, py, pressure)
+                try {
+                    injectEvent(ev)
+                } finally {
+                    ev.recycle()
+                }
+            },
+        )
+
+    /**
+     * 可独立单测的点击事件序列：一旦 `ACTION_DOWN` 成功发出而 `ACTION_UP` 失败，必补发 `ACTION_CANCEL`。
+     */
+    internal inline fun runTapSequence(
+        nowMs: () -> Long,
+        sendTouch: (downTime: Long, eventTime: Long, action: Int, x: Float, y: Float, pressure: Float) -> Boolean,
+        x: Float,
+        y: Float,
+    ): Boolean {
+        val downTime = nowMs()
+        if (!sendTouch(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 1.0f)) {
+            return false
+        }
+        var terminated = false
+        return try {
+            val upTime = nowMs().coerceAtLeast(downTime + 12L)
+            val okUp = sendTouch(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0.0f)
+            terminated = okUp
+            okUp
+        } finally {
+            if (!terminated) {
+                val cancelTime = nowMs().coerceAtLeast(downTime + 1L)
+                runCatching {
+                    sendTouch(downTime, cancelTime, MotionEvent.ACTION_CANCEL, x, y, 0.0f)
+                }
+            }
+        }
+    }
+
+    /**
+     * 可独立单测的手势事件序列：
+     * 一旦 `ACTION_DOWN` 成功发出，无论是中途 `ACTION_MOVE` 失败、异常，还是用户在 `delay` 期间点击「停止生成」触发
+     * `CancellationException`，`finally` 均保证同步补发 `ACTION_CANCEL`，绝不遗留按住不放的残留触摸状态。
+     */
+    internal suspend inline fun runGestureSequence(
+        fromX: Float,
+        fromY: Float,
+        toX: Float,
+        toY: Float,
+        durationMs: Long,
+        nowMs: () -> Long,
+        sleepMs: suspend (Long) -> Unit,
+        sendTouch: (downTime: Long, eventTime: Long, action: Int, x: Float, y: Float, pressure: Float) -> Boolean,
     ): Boolean {
         val isQuickTap = hypot(toX - fromX, toY - fromY) < 12f && durationMs <= 100L
         if (isQuickTap) {
-            return injectTap(fromX, fromY)
+            return runTapSequence(nowMs = nowMs, sendTouch = sendTouch, x = fromX, y = fromY)
         }
 
         val totalMs = durationMs.coerceAtLeast(50L)
-        val downTime = SystemClock.uptimeMillis()
-        val down = obtainTouchEvent(downTime, downTime, MotionEvent.ACTION_DOWN, fromX, fromY, 1.0f)
-        val okDown = try {
-            injectEvent(down)
-        } finally {
-            down.recycle()
+        val downTime = nowMs()
+        if (!sendTouch(downTime, downTime, MotionEvent.ACTION_DOWN, fromX, fromY, 1.0f)) {
+            return false
         }
-        if (!okDown) return false
 
-        // 按 ~16ms (60Hz) 帧步进平滑插值注入 MOVE 事件，兼容长按（原地微停留）与滑动手势
-        val steps = (totalMs / 16L).toInt().coerceIn(2, 120)
-        val stepDelay = (totalMs / steps).coerceAtLeast(4L)
-        for (i in 1 until steps) {
-            delay(stepDelay)
-            val fraction = i.toFloat() / steps.toFloat()
-            val cx = fromX + (toX - fromX) * fraction
-            val cy = fromY + (toY - fromY) * fraction
-            val now = SystemClock.uptimeMillis()
-            val move = obtainTouchEvent(downTime, now, MotionEvent.ACTION_MOVE, cx, cy, 1.0f)
-            try {
-                if (!injectEvent(move)) return false
-            } finally {
-                move.recycle()
-            }
-        }
-        val remaining = (downTime + totalMs) - SystemClock.uptimeMillis()
-        if (remaining > 0) delay(remaining)
-
-        val upTime = SystemClock.uptimeMillis()
-        val up = obtainTouchEvent(downTime, upTime, MotionEvent.ACTION_UP, toX, toY, 0.0f)
+        var lastX = fromX
+        var lastY = fromY
+        var terminated = false
         return try {
-            injectEvent(up)
+            val steps = (totalMs / 16L).toInt().coerceIn(2, 120)
+            val stepDelay = (totalMs / steps).coerceAtLeast(4L)
+            for (i in 1 until steps) {
+                sleepMs(stepDelay)
+                val fraction = i.toFloat() / steps.toFloat()
+                val cx = fromX + (toX - fromX) * fraction
+                val cy = fromY + (toY - fromY) * fraction
+                lastX = cx
+                lastY = cy
+                val now = nowMs().coerceAtLeast(downTime + 1L)
+                if (!sendTouch(downTime, now, MotionEvent.ACTION_MOVE, cx, cy, 1.0f)) {
+                    return false
+                }
+            }
+            val remaining = (downTime + totalMs) - nowMs()
+            if (remaining > 0) {
+                sleepMs(remaining)
+            }
+
+            val upTime = nowMs().coerceAtLeast(downTime + 1L)
+            lastX = toX
+            lastY = toY
+            val okUp = sendTouch(downTime, upTime, MotionEvent.ACTION_UP, toX, toY, 0.0f)
+            terminated = okUp
+            okUp
         } finally {
-            up.recycle()
+            if (!terminated) {
+                // 此处绝不挂起，即使处于协程取消栈展开期间也能同步通过 Binder 发出 ACTION_CANCEL
+                val cancelTime = nowMs().coerceAtLeast(downTime + 1L)
+                runCatching {
+                    sendTouch(downTime, cancelTime, MotionEvent.ACTION_CANCEL, lastX, lastY, 0.0f)
+                }
+            }
         }
     }
 
