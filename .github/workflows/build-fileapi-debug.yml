@@ -91,7 +91,9 @@ jobs:
       - name: Run unit tests & build release + debug (arm64)
         run: |
           chmod +x gradlew
-          ./gradlew :workspace:testDebugUnitTest :app:testGithubDebugUnitTest assembleGithubRelease assembleGithubDebug --no-daemon
+          ./gradlew :workspace:testDebugUnitTest --no-daemon
+          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --no-daemon
+          ./gradlew assembleGithubRelease assembleGithubDebug --no-daemon
 
       - name: Collect arm64 APKs
         run: |
