@@ -42,7 +42,7 @@ val appModule = module {
     }
 
     single {
-        HostShellExecutor()
+        HostShellExecutor(context = get())
     }
 
     single {

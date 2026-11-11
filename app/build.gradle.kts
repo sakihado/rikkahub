@@ -335,6 +335,11 @@ dependencies {
     // sqlite-android (requery SQLite for Android)
     implementation(libs.sqlite.android)
 
+    // Shizuku / Sui privileged Binder IPC & Android hidden API exemption
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+    implementation(libs.hiddenapibypass)
+
     // modules
     implementation(project(":ai"))
     implementation(project(":web"))

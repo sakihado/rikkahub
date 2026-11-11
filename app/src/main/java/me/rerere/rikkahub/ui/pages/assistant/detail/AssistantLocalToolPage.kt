@@ -43,7 +43,7 @@ import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.Assistant
-import me.rerere.rikkahub.phoneuse.HostPrivilegeState
+import me.rerere.rikkahub.phoneuse.HostBackendType
 import me.rerere.rikkahub.phoneuse.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.RootPhoneController
@@ -119,14 +119,23 @@ private fun AssistantLocalToolContent(
 
     val phoneUseServiceOn = phoneUseManager.controller.collectAsStateWithLifecycle().value != null
     val isRootBacked by phoneUseManager.isRootBacked.collectAsStateWithLifecycle()
-    val privilegeState by hostShellExecutor.privilegeState.collectAsStateWithLifecycle()
+    val backendState by hostShellExecutor.backendState.collectAsStateWithLifecycle()
 
     val permissionRequiredText =
         stringResource(R.string.assistant_page_local_tools_screen_time_permission_required)
     val floatingWindowRequiredText =
         stringResource(R.string.assistant_page_local_tools_phone_use_floating_window_required)
     val enableServiceText = stringResource(R.string.assistant_page_local_tools_phone_use_enable_service)
-    val rootReadyToastText = stringResource(R.string.assistant_page_local_tools_phone_use_root_ready)
+    val suiLabel = stringResource(R.string.host_backend_label_sui)
+    val shizukuLabel = stringResource(R.string.host_backend_label_shizuku)
+    val suLabel = stringResource(R.string.host_backend_label_su)
+
+    fun backendDisplayName(type: HostBackendType): String = when (type) {
+        HostBackendType.SUI_ROOT -> suiLabel
+        HostBackendType.SHIZUKU_SHELL -> shizukuLabel
+        HostBackendType.SU_ROOT -> suLabel
+        HostBackendType.UNKNOWN, HostBackendType.UNPRIVILEGED -> suLabel
+    }
 
     val calendarPermissionState = rememberPermissionState(
         permissions = setOf(
@@ -155,15 +164,19 @@ private fun AssistantLocalToolContent(
             navController.navigate(Screen.SettingPreferencesNotification)
             return
         }
-        if (enabled && option == LocalToolOption.PhoneUse && !phoneUseServiceOn) {
+        if (enabled && option == LocalToolOption.PhoneUse && !isRootBacked) {
             scope.launch {
-                val rooted = hostShellExecutor.probeRootAccess(forceRefresh = true)
-                if (rooted) {
-                    hostShellExecutor.ensureStorageAccessViaRoot(context.packageName)
+                val granted = hostShellExecutor.ensurePrivilegedAccess(interactive = true)
+                if (granted) {
+                    hostShellExecutor.ensureStorageAccess(context.packageName)
                     phoneUseManager.attachRoot(rootPhoneController)
-                    toaster.show(message = rootReadyToastText, type = ToastType.Success)
+                    val label = backendDisplayName(hostShellExecutor.backendState.value)
+                    toaster.show(
+                        message = context.getString(R.string.assistant_page_local_tools_phone_use_root_ready, label),
+                        type = ToastType.Success,
+                    )
                 } else if (phoneUseManager.controller.value == null) {
-                    // 无 Root 权限且无障碍服务还没开时，才回退引导去系统无障碍设置
+                    // 无 Sui / Shizuku / Root 权限且无障碍服务还没开时，才回退引导去系统无障碍设置
                     toaster.show(message = enableServiceText, type = ToastType.Warning)
                     context.openAccessibilitySettings()
                 }
@@ -171,9 +184,9 @@ private fun AssistantLocalToolContent(
         }
         if (enabled && option == LocalToolOption.AndroidShell) {
             scope.launch {
-                val rooted = hostShellExecutor.probeRootAccess(forceRefresh = true)
-                if (rooted) {
-                    hostShellExecutor.ensureStorageAccessViaRoot(context.packageName)
+                val granted = hostShellExecutor.ensurePrivilegedAccess(interactive = true)
+                if (granted) {
+                    hostShellExecutor.ensureStorageAccess(context.packageName)
                     if (PhoneUseManager.isSupported) {
                         phoneUseManager.attachRoot(rootPhoneController)
                     }
@@ -307,9 +320,12 @@ private fun AssistantLocalToolContent(
                     description = {
                         Column {
                             Text(stringResource(R.string.assistant_page_local_tools_phone_use_desc))
-                            if (isRootBacked) {
+                            if (isRootBacked && backendState.isPrivileged) {
                                 Text(
-                                    text = stringResource(R.string.assistant_page_local_tools_phone_use_root_active),
+                                    text = stringResource(
+                                        R.string.assistant_page_local_tools_phone_use_root_active,
+                                        backendDisplayName(backendState),
+                                    ),
                                     color = DiffAddedColor,
                                 )
                             } else if (LocalToolOption.PhoneUse in assistant.localTools && !phoneUseServiceOn) {
@@ -330,18 +346,26 @@ private fun AssistantLocalToolContent(
                     description = {
                         Column {
                             Text(stringResource(R.string.assistant_page_local_tools_android_shell_desc))
-                            when (privilegeState) {
-                                HostPrivilegeState.ROOT_GRANTED -> Text(
-                                    text = stringResource(R.string.assistant_page_local_tools_android_shell_status_root),
+                            when (backendState) {
+                                HostBackendType.SUI_ROOT -> Text(
+                                    text = stringResource(R.string.assistant_page_local_tools_android_shell_status_sui),
                                     color = DiffAddedColor,
                                 )
-                                HostPrivilegeState.UNPRIVILEGED -> if (LocalToolOption.AndroidShell in assistant.localTools) {
+                                HostBackendType.SHIZUKU_SHELL -> Text(
+                                    text = stringResource(R.string.assistant_page_local_tools_android_shell_status_shizuku),
+                                    color = DiffAddedColor,
+                                )
+                                HostBackendType.SU_ROOT -> Text(
+                                    text = stringResource(R.string.assistant_page_local_tools_android_shell_status_su),
+                                    color = DiffAddedColor,
+                                )
+                                HostBackendType.UNPRIVILEGED -> if (LocalToolOption.AndroidShell in assistant.localTools) {
                                     Text(
                                         text = stringResource(R.string.assistant_page_local_tools_android_shell_status_unprivileged),
                                         color = MaterialTheme.colorScheme.tertiary,
                                     )
                                 }
-                                HostPrivilegeState.UNKNOWN -> Unit
+                                HostBackendType.UNKNOWN -> Unit
                             }
                         }
                     },

@@ -48,7 +48,7 @@ class LocalTools(
             manager = phoneUseManager,
             isFloatingWindowOn = { isFloatingChatWindowOn(context, settingsStore.settingsFlow.value) },
             ensureControllerReady = {
-                if (hostShellExecutor.probeRootAccess()) {
+                if (hostShellExecutor.ensurePrivilegedAccess(interactive = true)) {
                     phoneUseManager.attachRoot(rootPhoneController)
                 }
             },

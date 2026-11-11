@@ -80,13 +80,20 @@ jobs:
           }
           JSON
 
-      - name: Build libsafesdcard.so for PRoot /sdcard trash protection
+      - name: Build native helpers (libsafesdcard.so for PRoot & libshelldrop.so for Sui UID 2000)
         run: |
           sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
           mkdir -p app/src/main/assets/safesdcard
           aarch64-linux-gnu-gcc -shared -fPIC -O2 workspace/safesdcard/safesdcard.c -o app/src/main/assets/safesdcard/libsafesdcard_arm64.so -ldl
           gcc -shared -fPIC -O2 workspace/safesdcard/safesdcard.c -o app/src/main/assets/safesdcard/libsafesdcard_x86_64.so -ldl
           ls -lh app/src/main/assets/safesdcard
+
+          NDK_DIR="${ANDROID_NDK_LATEST_HOME:-$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -n1)}"
+          CLANG_BIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          mkdir -p app/src/github/jniLibs/arm64-v8a app/src/github/jniLibs/x86_64
+          "$CLANG_BIN/aarch64-linux-android26-clang" -O2 -fPIE -pie -Wl,-z,max-page-size=16384 app/shelldrop/shelldrop.c -o app/src/github/jniLibs/arm64-v8a/libshelldrop.so
+          "$CLANG_BIN/x86_64-linux-android26-clang" -O2 -fPIE -pie -Wl,-z,max-page-size=16384 app/shelldrop/shelldrop.c -o app/src/github/jniLibs/x86_64/libshelldrop.so
+          ls -lh app/src/github/jniLibs/arm64-v8a app/src/github/jniLibs/x86_64
 
       - name: Run unit tests & build release + debug (arm64)
         run: |

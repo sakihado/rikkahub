@@ -231,12 +231,19 @@ class RikkaHubApp : Application() {
                 get<HostBridgeDaemon>().start()
 
                 val executor = get<HostShellExecutor>()
-                if (executor.hasSuBinaryOnDevice() && executor.probeRootAccess()) {
-                    executor.ensureStorageAccessViaRoot(packageName)
-                    if (PhoneUseManager.isSupported) {
-                        get<PhoneUseManager>().attachRoot(get<RootPhoneController>())
+                val phoneUseManager = get<PhoneUseManager>()
+                executor.initializeOnStartup { backend ->
+                    if (backend.isPrivileged) {
+                        get<AppScope>().launch(Dispatchers.IO) {
+                            executor.ensureStorageAccess(packageName)
+                        }
+                        if (PhoneUseManager.isSupported) {
+                            phoneUseManager.attachRoot(get<RootPhoneController>())
+                        }
+                        Log.i(TAG, "Privileged host backend active ($backend)")
+                    } else if (PhoneUseManager.isSupported) {
+                        phoneUseManager.detachRoot()
                     }
-                    Log.i(TAG, "Root/Shell engine attached for PhoneUse & HostBridge")
                 }
             }.onFailure {
                 Log.w(TAG, "initHostBridgeAndRoot failed", it)

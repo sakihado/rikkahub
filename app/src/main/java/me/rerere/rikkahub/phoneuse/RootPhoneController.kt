@@ -169,6 +169,11 @@ class RootPhoneController(
             indicator.show(fx, fy, tx, ty, durationMs)
         }
 
+        // 优先走 Sui / Shizuku Binder 直连 IInputManager（~1-2ms 响应），失败时自动回退命令行 input
+        if (executor.canUseBinderFastInput && ShizukuFastInput.injectGesture(fx, fy, tx, ty, durationMs)) {
+            return@withContext true
+        }
+
         val isQuickTap = hypot(tx - fx, ty - fy) < 12f && durationMs <= 100L
         val cmd = if (isQuickTap) {
             "input tap ${fx.roundToInt()} ${fy.roundToInt()}"
@@ -180,6 +185,7 @@ class RootPhoneController(
     }
 
     override suspend fun setText(elementIndex: Int?, text: String): Boolean = withContext(Dispatchers.IO) {
+        val fastInput = executor.canUseBinderFastInput
         if (elementIndex != null) {
             val el = lastElements.getOrNull(elementIndex) ?: return@withContext false
             val cx = ((el.left + el.right) / 2f).roundToInt()
@@ -187,17 +193,22 @@ class RootPhoneController(
             withContext(Dispatchers.Main) {
                 indicator.show(cx.toFloat(), cy.toFloat(), cx.toFloat(), cy.toFloat(), 60L)
             }
-            val tapRes = executor.execute("input tap $cx $cy", asRoot = false, timeoutMs = 4_000L)
-            if (tapRes.exitCode != 0) return@withContext false
-            delay(220L)
+            val tapped = (fastInput && ShizukuFastInput.injectTap(cx.toFloat(), cy.toFloat())) ||
+                executor.execute("input tap $cx $cy", asRoot = false, timeoutMs = 4_000L).exitCode == 0
+            if (!tapped) return@withContext false
+            delay(200L)
         }
 
         // 全选并清除输入框原有内容（Ctrl+A -> DEL）
-        executor.execute(
-            command = "input keycombination 113 29 2>/dev/null; input keyevent 67",
-            asRoot = false,
-            timeoutMs = 4_000L,
-        )
+        if (fastInput && ShizukuFastInput.injectCtrlA()) {
+            ShizukuFastInput.injectKeyCode(android.view.KeyEvent.KEYCODE_DEL)
+        } else {
+            executor.execute(
+                command = "input keycombination 113 29 2>/dev/null; input keyevent 67",
+                asRoot = false,
+                timeoutMs = 4_000L,
+            )
+        }
 
         if (text.isEmpty()) return@withContext true
 
@@ -206,12 +217,27 @@ class RootPhoneController(
             val cm = context.getSystemService(ClipboardManager::class.java)
             cm?.setPrimaryClip(ClipData.newPlainText("rikkahub_input", text))
         }
-        delay(80L)
+        delay(60L)
+        if (fastInput && ShizukuFastInput.injectKeyCode(android.view.KeyEvent.KEYCODE_PASTE)) {
+            return@withContext true
+        }
         val pasteRes = executor.execute("input keyevent 279", asRoot = false, timeoutMs = 4_000L)
         pasteRes.exitCode == 0
     }
 
     override suspend fun pressKey(key: PhoneKey): Boolean = withContext(Dispatchers.IO) {
+        if (executor.canUseBinderFastInput) {
+            val fastCode = when (key) {
+                PhoneKey.BACK -> android.view.KeyEvent.KEYCODE_BACK
+                PhoneKey.HOME -> android.view.KeyEvent.KEYCODE_HOME
+                PhoneKey.RECENTS -> android.view.KeyEvent.KEYCODE_APP_SWITCH
+                PhoneKey.ENTER -> android.view.KeyEvent.KEYCODE_ENTER
+                PhoneKey.NOTIFICATIONS -> null
+            }
+            if (fastCode != null && ShizukuFastInput.injectKeyCode(fastCode)) {
+                return@withContext true
+            }
+        }
         val cmd = when (key) {
             PhoneKey.BACK -> "input keyevent 4"
             PhoneKey.HOME -> "input keyevent 3"
