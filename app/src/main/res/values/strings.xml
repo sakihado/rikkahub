@@ -1384,6 +1384,8 @@
   <string name="imggen_page_select_image">Select image</string>
   <string name="workspace_detail_compatibility_mode">Compatibility mode</string>
   <string name="workspace_detail_compatibility_mode_desc">Try enabling this if the terminal fails to start. It may reduce performance. Applies to new terminal tabs and subsequent commands.</string>
+  <string name="workspace_detail_host_bridge">Host Bridge &amp; Shared Storage (/sdcard &amp; host-sh)</string>
+  <string name="workspace_detail_host_bridge_desc">Allow this workspace to access /sdcard (with trash protection) and run read-only Android host commands via host-sh. Disable for strict sandbox isolation.</string>
   <string name="workspace_detail_settings_save_failed">Failed to save settings</string>
   <string name="setting_display_page_background_effect_title">Input bar background effect</string>
   <string name="setting_display_page_background_effect_desc">Enable a blur or glass effect on the chat input bar</string>

@@ -84,11 +84,19 @@ val repositoryModule = module {
                 WorkspaceBindMount(
                     source = File(context.filesDir, "host_bridge").apply { mkdirs() },
                     target = "/run/host_bridge",
+                    requiresHostBridge = true,
                 ),
                 WorkspaceBindMount(
                     source = android.os.Environment.getExternalStorageDirectory(),
                     target = "/sdcard",
                     writable = false,
+                    requiresHostBridge = true,
+                ),
+                WorkspaceBindMount(
+                    source = android.os.Environment.getExternalStorageDirectory(),
+                    target = "/storage/emulated/0",
+                    writable = false,
+                    requiresHostBridge = true,
                 ),
                 WorkspaceBindMount(
                     source = File(
@@ -97,6 +105,16 @@ val repositoryModule = module {
                     ),
                     target = "/sdcard/Download/RikkaHub",
                     writable = true,
+                    requiresHostBridge = true,
+                ),
+                WorkspaceBindMount(
+                    source = File(
+                        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                        "RikkaHub"
+                    ),
+                    target = "/storage/emulated/0/Download/RikkaHub",
+                    writable = true,
+                    requiresHostBridge = true,
                 ),
             ),
         )

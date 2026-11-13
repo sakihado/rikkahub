@@ -164,6 +164,9 @@ class WorkspaceRepository(
         dao.setShellCompatibilityMode(id, enabled, System.currentTimeMillis())
     }
 
+    suspend fun setHostBridgeEnabled(id: String, enabled: Boolean): Boolean =
+        setToolApproval(id, WorkspaceEntity.HOST_BRIDGE_CONFIG_KEY, enabled)
+
     suspend fun setToolApproval(id: String, toolName: String, needsApproval: Boolean): Boolean {
         val workspace = dao.getById(id) ?: return false
         val overrides = workspace.toolApprovalOverrides() + (toolName to needsApproval)
@@ -214,7 +217,7 @@ class WorkspaceRepository(
         if (workspace.isSsh()) {
             workspace.sshSettings()?.let { SshWorkspaceBackend.layoutOf(it.remoteDir) }
         } else {
-            manager.layout
+            manager.layout(workspace.hostBridgeEnabled())
         }
     }
 
@@ -395,7 +398,11 @@ class WorkspaceRepository(
             val settings = workspace.sshSettings() ?: error("SSH workspace config is missing: ${workspace.id}")
             SshWorkspaceBackend(sshPool, workspace.id, settings.toConnectionConfig())
         } else {
-            manager.backend(workspace.root, workspace.shellCompatibilityMode)
+            manager.backend(
+                root = workspace.root,
+                shellCompatibilityMode = workspace.shellCompatibilityMode,
+                hostBridgeEnabled = workspace.hostBridgeEnabled(),
+            )
         }
 
     private fun SshWorkspaceSettings.toConnectionConfig() = SshConnectionConfig(

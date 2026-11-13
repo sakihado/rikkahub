@@ -106,4 +106,10 @@ class LocalTools(
         }
         return tools
     }
+
+    suspend fun ensureHostPrivilegeIfNeeded() {
+        if (!BuildConfig.IS_PLAY_STORE && !hostPrivilegeManager.backendState.value.isPrivileged) {
+            hostPrivilegeManager.ensurePrivilegedAccess(interactive = false)
+        }
+    }
 }

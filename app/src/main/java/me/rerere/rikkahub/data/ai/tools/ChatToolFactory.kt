@@ -149,6 +149,11 @@ class ChatToolFactory(
             )
             return emptyList()
         }
+        // 本地 PRoot 工作区启用了宿主机桥接与共享存储时，按需确保已获取 Sui/Shizuku/Root 特权与存储权限，
+        // 这样即便用户未开启独立的 AndroidShell 本地工具，工作区也能直接读写 /sdcard 并调用 host-sh。
+        if (!workspace.isSsh() && workspace.hostBridgeEnabled()) {
+            localTools.ensureHostPrivilegeIfNeeded()
+        }
         return createWorkspaceTools(workspaceId, workspaceRepository, cwd, conversationId, backgroundShellManager)
     }
 }

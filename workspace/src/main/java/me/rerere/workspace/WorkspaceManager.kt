@@ -18,18 +18,29 @@ class WorkspaceManager(
     // 按 target 长度降序, 保证 /a/b 优先于 /a 匹配
     private val sortedBindMounts = bindMounts.sortedByDescending { it.target.trimEnd('/').length }
 
-    val layout = WorkspaceLayout(
+    private fun activeBindMounts(hostBridgeEnabled: Boolean, sorted: Boolean = false): List<WorkspaceBindMount> {
+        val source = if (sorted) sortedBindMounts else bindMounts
+        return if (hostBridgeEnabled) source else source.filterNot { it.requiresHostBridge }
+    }
+
+    fun layout(hostBridgeEnabled: Boolean = true): WorkspaceLayout = WorkspaceLayout(
         workspaceDir = ROOTFS_WORKSPACE_DIR,
         writableRoots = listOf(ROOTFS_WORKSPACE_DIR, "/tmp") +
-            bindMounts.filter { it.writable }.map { it.target.trimEnd('/') },
+            activeBindMounts(hostBridgeEnabled).filter { it.writable }.map { it.target.trimEnd('/') },
     )
+
+    val layout = layout(hostBridgeEnabled = true)
 
     init {
         baseDir.mkdirs()
     }
 
-    fun backend(root: String, shellCompatibilityMode: Boolean = false): WorkspaceBackend =
-        LocalWorkspaceBackend(this, root, shellCompatibilityMode)
+    fun backend(
+        root: String,
+        shellCompatibilityMode: Boolean = false,
+        hostBridgeEnabled: Boolean = true,
+    ): WorkspaceBackend =
+        LocalWorkspaceBackend(this, root, shellCompatibilityMode, hostBridgeEnabled)
 
     fun ensureWorkspace(root: String): File {
         val dir = workspaceDir(root)
@@ -130,11 +141,11 @@ class WorkspaceManager(
      * 可以直接用文件 IO 访问, 无需经过 PRoot; 只是 Rootfs 目录里对应位置是个空挂载点,
      * 按 [WorkspaceStorageArea.LINUX] 解析必然落空。
      */
-    fun resolveRootfsPath(root: String, path: String): RootfsLocation {
+    fun resolveRootfsPath(root: String, path: String, hostBridgeEnabled: Boolean = true): RootfsLocation {
         val trimmed = path.trim().trimEnd('/').ifBlank { "/" }
         require(trimmed.startsWith("/")) { "Rootfs path must be absolute: $path" }
 
-        sortedBindMounts.forEach { mount ->
+        activeBindMounts(hostBridgeEnabled, sorted = true).forEach { mount ->
             val target = mount.target.trimEnd('/')
             if (trimmed == target) return RootfsLocation(mount.source, "")
             if (trimmed.startsWith("$target/")) {
@@ -157,18 +168,23 @@ class WorkspaceManager(
         return RootfsLocation(linuxDir(root), trimmed.trimStart('/'))
     }
 
-    fun rootfsFileSize(root: String, path: String): Long =
-        resolveRootfsFile(root, path).also { it.requireReadableFile(path) }.length()
+    fun rootfsFileSize(root: String, path: String, hostBridgeEnabled: Boolean = true): Long =
+        resolveRootfsFile(root, path, hostBridgeEnabled).also { it.requireReadableFile(path) }.length()
 
-    fun exportRootfsFile(root: String, path: String, outputStream: OutputStream) {
-        val file = resolveRootfsFile(root, path)
+    fun exportRootfsFile(
+        root: String,
+        path: String,
+        outputStream: OutputStream,
+        hostBridgeEnabled: Boolean = true,
+    ) {
+        val file = resolveRootfsFile(root, path, hostBridgeEnabled)
         file.requireReadableFile(path)
         outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
     }
 
     /** Rootfs 内绝对路径对应的宿主机文件, 不检查是否存在 */
-    fun resolveRootfsFile(root: String, path: String): File {
-        val location = resolveRootfsPath(root, path)
+    fun resolveRootfsFile(root: String, path: String, hostBridgeEnabled: Boolean = true): File {
+        val location = resolveRootfsPath(root, path, hostBridgeEnabled)
         return fileSystem.resolve(location.rootDir, location.relativePath)
     }
 
@@ -208,8 +224,9 @@ class WorkspaceManager(
         timeoutMillis: Long = DEFAULT_COMMAND_TIMEOUT_MS,
         stdin: ByteArray? = null,
         shellCompatibilityMode: Boolean = false,
+        hostBridgeEnabled: Boolean = true,
     ): WorkspaceCommandResult =
-        shellRunner.execute(shellContext(root, command, cwd, timeoutMillis, stdin, shellCompatibilityMode))
+        shellRunner.execute(shellContext(root, command, cwd, timeoutMillis, stdin, shellCompatibilityMode, hostBridgeEnabled))
 
     fun startBackgroundCommand(
         root: String,
@@ -217,8 +234,9 @@ class WorkspaceManager(
         cwd: String,
         id: String,
         shellCompatibilityMode: Boolean = false,
+        hostBridgeEnabled: Boolean = true,
     ): WorkspaceBackgroundCommand =
-        shellRunner.startBackground(shellContext(root, command, cwd, 0, null, shellCompatibilityMode), id)
+        shellRunner.startBackground(shellContext(root, command, cwd, 0, null, shellCompatibilityMode, hostBridgeEnabled), id)
 
     private fun shellContext(
         root: String,
@@ -227,6 +245,7 @@ class WorkspaceManager(
         timeoutMillis: Long,
         stdin: ByteArray?,
         shellCompatibilityMode: Boolean,
+        hostBridgeEnabled: Boolean = true,
     ): WorkspaceShellContext {
         require(command.isNotBlank()) { "Command is required" }
         val workingDir = fileSystem.resolve(filesDir(root), cwd)
@@ -243,15 +262,15 @@ class WorkspaceManager(
             workingDir = workingDir,
             timeoutMillis = timeoutMillis,
             stdin = stdin,
-            bindMounts = bindMounts,
+            bindMounts = activeBindMounts(hostBridgeEnabled),
             shellCompatibilityMode = shellCompatibilityMode,
         )
     }
 
     /** 交互式终端启动前的准备: 补齐目录, 并按当前网络刷新 Rootfs 的 DNS 等配置 */
-    fun prepareTerminal(root: String, nameservers: List<String>) {
+    fun prepareTerminal(root: String, nameservers: List<String>, hostBridgeEnabled: Boolean = true) {
         ensureWorkspace(root)
-        bindMounts.forEach { mount ->
+        activeBindMounts(hostBridgeEnabled).forEach { mount ->
             if (mount.writable || !mount.source.exists()) {
                 runCatching { mount.source.mkdirs() }
             }
@@ -259,13 +278,17 @@ class WorkspaceManager(
         RootfsPatcher().patch(linuxDir(root), RootfsPatchOptions(nameservers = nameservers))
     }
 
-    fun terminalLaunch(root: String, shellCompatibilityMode: Boolean): WorkspaceTerminalLaunch? =
+    fun terminalLaunch(
+        root: String,
+        shellCompatibilityMode: Boolean,
+        hostBridgeEnabled: Boolean = true,
+    ): WorkspaceTerminalLaunch? =
         shellRunner.terminalLaunch(
             WorkspaceTerminalContext(
                 filesDir = filesDir(root),
                 linuxDir = linuxDir(root),
                 tempDir = tempDir(root),
-                bindMounts = bindMounts,
+                bindMounts = activeBindMounts(hostBridgeEnabled),
                 shellCompatibilityMode = shellCompatibilityMode,
             )
         )

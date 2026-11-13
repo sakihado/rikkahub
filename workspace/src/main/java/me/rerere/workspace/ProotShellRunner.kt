@@ -8,6 +8,8 @@ data class WorkspaceBindMount(
     val target: String,
     /** AI 写入该目录时免强制审批 */
     val writable: Boolean = false,
+    /** 是否属于宿主机桥接与共享存储挂载（如 `/run/host_bridge`、`/sdcard`、`/storage/emulated/0`），受工作区桥接开关控制 */
+    val requiresHostBridge: Boolean = false,
 ) {
     init {
         require(target.startsWith("/")) { "Bind mount target must be absolute: $target" }

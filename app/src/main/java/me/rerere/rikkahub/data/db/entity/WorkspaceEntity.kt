@@ -70,6 +70,13 @@ data class WorkspaceEntity(
         JsonInstant.decodeFromString<Map<String, Boolean>>(toolApprovals)
     }.getOrDefault(emptyMap())
 
+    /**
+     * 本地 PRoot 工作区是否启用宿主机桥接与共享存储（`/sdcard` 直通、`/storage/emulated/0` 别名与 `host-sh` 命令桥接）。
+     * 复用 [toolApprovals] JSON 映射存储，无需变更 Room 数据库表结构；默认开启。
+     */
+    fun hostBridgeEnabled(): Boolean =
+        toolApprovalOverrides()[HOST_BRIDGE_CONFIG_KEY] ?: true
+
     fun toWorkspace(): Workspace = Workspace(
         id = id,
         name = name,
@@ -80,4 +87,8 @@ data class WorkspaceEntity(
         updatedAt = updatedAt,
         lastAccessAt = lastAccessAt,
     )
+
+    companion object {
+        const val HOST_BRIDGE_CONFIG_KEY = "__host_bridge_enabled"
+    }
 }

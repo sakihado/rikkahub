@@ -140,7 +140,11 @@ class WorkspaceTerminalSessionManager internal constructor(
                     if (!workspaceManager.hasRootfs(root)) {
                         false
                     } else {
-                        workspaceManager.prepareTerminal(root, appContext.activeDnsServers())
+                        workspaceManager.prepareTerminal(
+                            root = root,
+                            nameservers = appContext.activeDnsServers(),
+                            hostBridgeEnabled = workspace.hostBridgeEnabled(),
+                        )
                         true
                     }
                 }
@@ -208,7 +212,11 @@ class WorkspaceTerminalSessionManager internal constructor(
                 workspaceRepository.openSshShell(workspace, columns, rows)
             }
         } else {
-            workspaceManager.terminalLaunch(workspace.root, workspace.shellCompatibilityMode)?.toTransport()
+            workspaceManager.terminalLaunch(
+                root = workspace.root,
+                shellCompatibilityMode = workspace.shellCompatibilityMode,
+                hostBridgeEnabled = workspace.hostBridgeEnabled(),
+            )?.toTransport()
                 ?: error("Interactive terminal is not supported")
         }
 

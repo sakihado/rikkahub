@@ -256,6 +256,7 @@ fun WorkspaceDetailPage(id: String) {
                         onInstallRootfs = { showInstallDialog = true },
                         onToolApprovalChange = vm::setToolApproval,
                         onShellCompatibilityModeChange = vm::setShellCompatibilityMode,
+                        onHostBridgeEnabledChange = vm::setHostBridgeEnabled,
                         onEditSsh = { navController.navigate(Screen.WorkspaceSshEditor(id)) },
                     )
 
@@ -415,6 +416,7 @@ private fun WorkspaceBasicPage(
     onInstallRootfs: () -> Unit,
     onToolApprovalChange: (String, Boolean) -> Unit,
     onShellCompatibilityModeChange: (Boolean) -> Unit,
+    onHostBridgeEnabledChange: (Boolean) -> Unit,
     onEditSsh: () -> Unit,
 ) {
     val shellStatus = workspace?.shellStatus
@@ -494,6 +496,18 @@ private fun WorkspaceBasicPage(
                         leadingContent = { CardGroupIcon(HugeIcons.Wrench01) },
                         headlineContent = { Text(stringResource(R.string.workspace_detail_compatibility_mode)) },
                     )
+                    if (!me.rerere.rikkahub.BuildConfig.IS_PLAY_STORE) {
+                        switchItem(
+                            checked = workspace?.hostBridgeEnabled() ?: true,
+                            onCheckedChange = onHostBridgeEnabledChange,
+                            enabled = workspace != null,
+                            supportingContent = {
+                                Text(stringResource(R.string.workspace_detail_host_bridge_desc))
+                            },
+                            leadingContent = { CardGroupIcon(HugeIcons.FolderOpen) },
+                            headlineContent = { Text(stringResource(R.string.workspace_detail_host_bridge)) },
+                        )
+                    }
                 }
             }
         }

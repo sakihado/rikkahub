@@ -287,6 +287,19 @@ class WorkspaceDetailVM(
         }
     }
 
+    fun setHostBridgeEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                repository.setHostBridgeEnabled(id, enabled)
+                loadWorkspace()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _settingsError.value = error.message.orEmpty()
+            }
+        }
+    }
+
     fun setToolApproval(toolName: String, needsApproval: Boolean) {
         viewModelScope.launch {
             val workspace = state.value.workspace ?: return@launch

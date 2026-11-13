@@ -107,7 +107,9 @@ class HostPrivilegeManager(
                 }
                 if (pkgName != null && storageGrantedOnce.compareAndSet(false, true)) {
                     appScope.launch(Dispatchers.IO) {
-                        grantStorageAccessViaShell(pkgName, executor)
+                        if (!grantStorageAccessViaShell(pkgName, executor)) {
+                            storageGrantedOnce.set(false)
+                        }
                     }
                 }
                 Log.i(TAG, "Privileged host backend active ($backend)")
@@ -148,52 +150,58 @@ class HostPrivilegeManager(
      * 确保特权通道就绪。一旦就绪，[lifecycleObserver] 会自动统一挂载 `RootPhoneController` 并开通存储权限。
      * @param interactive 为 true 时允许弹出系统授权框（严格遵循 Sui/Shizuku 优先，绝不连弹两个窗）。
      */
-    suspend fun ensurePrivilegedAccess(interactive: Boolean = true): Boolean = authMutex.withLock {
-        if (BuildConfig.IS_PLAY_STORE) return@withLock false
-        registerShizukuListenersOnce()
+    suspend fun ensurePrivilegedAccess(interactive: Boolean = true): Boolean {
+        if (BuildConfig.IS_PLAY_STORE) return false
+        var resolvedState: HostBackendType? = null
+        val ok = authMutex.withLock {
+            registerShizukuListenersOnce()
 
-        val pkg = context?.packageName
-        if (pkg != null && !isShizukuBinderAlive()) {
-            runCatching { Sui.init(pkg) }
-        }
+            val pkg = context?.packageName
+            if (pkg != null && !isShizukuBinderAlive()) {
+                runCatching { Sui.init(pkg) }
+            }
 
-        // 优先级 1：Sui / Shizuku Binder
-        if (isShizukuBinderAlive()) {
-            if (isShizukuBinderReadyAndGranted()) {
-                updateBackendState(resolveGrantedShizukuType())
+            // 优先级 1：Sui / Shizuku Binder
+            if (isShizukuBinderAlive()) {
+                if (isShizukuBinderReadyAndGranted()) {
+                    resolvedState = resolveGrantedShizukuType()
+                    return@withLock true
+                }
+                if (!interactive) {
+                    return@withLock false
+                }
+                val granted = requestShizukuPermissionSuspend()
+                return@withLock if (granted && isShizukuBinderReadyAndGranted()) {
+                    resolvedState = resolveGrantedShizukuType()
+                    true
+                } else {
+                    // 用户在 Sui / Shizuku 弹窗点了拒绝时尊重选择，不紧接着弹第二次 Magisk 窗骚扰用户
+                    resolvedState = HostBackendType.UNPRIVILEGED
+                    false
+                }
+            }
+
+            // 优先级 2：Sui / Shizuku 不存在或未运行时，回退传统 su
+            if (_backendState.value == HostBackendType.SU_ROOT && suBinaryPath != null) {
+                resolvedState = HostBackendType.SU_ROOT
                 return@withLock true
             }
-            if (!interactive) {
+            if (!hasSuBinaryOnDevice()) {
+                resolvedState = HostBackendType.UNPRIVILEGED
                 return@withLock false
             }
-            val granted = requestShizukuPermissionSuspend()
-            return@withLock if (granted && isShizukuBinderReadyAndGranted()) {
-                updateBackendState(resolveGrantedShizukuType())
-                true
-            } else {
-                // 用户在 Sui / Shizuku 弹窗点了拒绝时尊重选择，不紧接着弹第二次 Magisk 窗骚扰用户
-                updateBackendState(HostBackendType.UNPRIVILEGED)
-                false
+            if (!interactive && suAuthorizedMarker?.exists() != true) {
+                return@withLock false
             }
+            if (probeSuAccessInternal()) {
+                resolvedState = HostBackendType.SU_ROOT
+                return@withLock true
+            }
+            resolvedState = HostBackendType.UNPRIVILEGED
+            false
         }
-
-        // 优先级 2：Sui / Shizuku 不存在或未运行时，回退传统 su
-        if (_backendState.value == HostBackendType.SU_ROOT && suBinaryPath != null) {
-            return@withLock true
-        }
-        if (!hasSuBinaryOnDevice()) {
-            updateBackendState(HostBackendType.UNPRIVILEGED)
-            return@withLock false
-        }
-        if (!interactive && suAuthorizedMarker?.exists() != true) {
-            return@withLock false
-        }
-        if (probeSuAccessInternal()) {
-            updateBackendState(HostBackendType.SU_ROOT)
-            return@withLock true
-        }
-        updateBackendState(HostBackendType.UNPRIVILEGED)
-        return@withLock false
+        resolvedState?.let(::updateBackendState)
+        return ok
     }
 
     /**
@@ -207,18 +215,23 @@ class HostPrivilegeManager(
 
     fun hasSuBinaryOnDevice(): Boolean = findSuBinary() != null
 
-    private suspend fun grantStorageAccessViaShell(packageName: String, executor: HostShellExecutor) {
-        if (!_backendState.value.isPrivileged) return
-        runCatching {
-            executor.execute(
-                command = "appops set $packageName MANAGE_EXTERNAL_STORAGE allow 2>/dev/null; " +
+    private suspend fun grantStorageAccessViaShell(packageName: String, executor: HostShellExecutor): Boolean {
+        if (!_backendState.value.isPrivileged) return false
+        return runCatching {
+            val res = executor.execute(
+                command = "cmd appops set --user 0 $packageName MANAGE_EXTERNAL_STORAGE allow 2>/dev/null || " +
+                    "appops set $packageName MANAGE_EXTERNAL_STORAGE allow 2>/dev/null; " +
                     "pm grant $packageName android.permission.READ_EXTERNAL_STORAGE 2>/dev/null; " +
-                    "pm grant $packageName android.permission.WRITE_EXTERNAL_STORAGE 2>/dev/null",
+                    "pm grant $packageName android.permission.WRITE_EXTERNAL_STORAGE 2>/dev/null; " +
+                    "mkdir -p /storage/emulated/0/.Trash-RikkaHub /storage/emulated/0/Download/RikkaHub 2>/dev/null; " +
+                    "chmod 0777 /storage/emulated/0/.Trash-RikkaHub 2>/dev/null; " +
+                    "cmd appops get $packageName MANAGE_EXTERNAL_STORAGE 2>/dev/null",
                 asRoot = false,
                 timeoutMs = 5_000L,
                 maxStdoutBytes = 512,
             )
-        }
+            res.exitCode == 0 && res.stdout.contains("allow", ignoreCase = true)
+        }.getOrDefault(false)
     }
 
     private fun registerShizukuListenersOnce() {

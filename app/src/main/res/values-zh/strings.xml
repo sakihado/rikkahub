@@ -1379,6 +1379,8 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="imggen_page_select_image">选择图片</string>
   <string name="workspace_detail_compatibility_mode">兼容模式</string>
   <string name="workspace_detail_compatibility_mode_desc">如果终端无法启动，请尝试启用此功能。这可能会降低性能。适用于新的终端标签页及后续命令。</string>
+  <string name="workspace_detail_host_bridge">宿主机桥接与共享存储 (/sdcard &amp; host-sh)</string>
+  <string name="workspace_detail_host_bridge_desc">允许此工作区直通访问手机 /sdcard（含防误删回收站）并通过 host-sh 执行宿主机只读诊断命令。关闭后退回纯隔离 Linux 沙盒。</string>
   <string name="workspace_detail_settings_save_failed">保存设置失败</string>
   <string name="setting_display_page_background_effect_title">输入栏背景效果</string>
   <string name="setting_display_page_background_effect_desc">为聊天输入栏启用模糊或玻璃效果</string>
