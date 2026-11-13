@@ -43,8 +43,8 @@ import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.Assistant
-import me.rerere.rikkahub.phoneuse.HostBackendType
-import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
+import me.rerere.rikkahub.hostshell.HostBackendType
+import me.rerere.rikkahub.hostshell.HostPrivilegeManager
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
 import me.rerere.rikkahub.ui.components.nav.BackButton

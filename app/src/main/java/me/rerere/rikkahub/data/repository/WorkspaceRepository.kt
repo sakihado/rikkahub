@@ -164,9 +164,6 @@ class WorkspaceRepository(
         dao.setShellCompatibilityMode(id, enabled, System.currentTimeMillis())
     }
 
-    suspend fun setHostBridgeEnabled(id: String, enabled: Boolean): Boolean =
-        setToolApproval(id, WorkspaceEntity.HOST_BRIDGE_CONFIG_KEY, enabled)
-
     suspend fun setToolApproval(id: String, toolName: String, needsApproval: Boolean): Boolean {
         val workspace = dao.getById(id) ?: return false
         val overrides = workspace.toolApprovalOverrides() + (toolName to needsApproval)
@@ -212,12 +209,12 @@ class WorkspaceRepository(
     }
 
     /** 工作区在执行环境内的目录约定, 工作区不存在时返回 null */
-    suspend fun layout(id: String): WorkspaceLayout? = dao.getById(id)?.let { workspace ->
+    suspend fun layout(id: String, hostAccess: Boolean = false): WorkspaceLayout? = dao.getById(id)?.let { workspace ->
         // 只需要目录约定, 不解密凭据也不建立连接
         if (workspace.isSsh()) {
             workspace.sshSettings()?.let { SshWorkspaceBackend.layoutOf(it.remoteDir) }
         } else {
-            manager.layout(workspace.hostBridgeEnabled())
+            manager.layout(hostAccess)
         }
     }
 
@@ -293,15 +290,17 @@ class WorkspaceRepository(
     suspend fun absoluteFileSize(
         id: String,
         path: String,
-    ): Long = readFromBackend(id) { it.absoluteFileSize(path) }
+        hostAccess: Boolean = false,
+    ): Long = readFromBackend(id, hostAccess) { it.absoluteFileSize(path) }
 
     /** 按环境内绝对路径解析宿主机上的文件, 不存在、不是文件或没有本地落点时返回 null */
     suspend fun resolveAbsoluteFile(
         id: String,
         path: String,
+        hostAccess: Boolean = false,
     ): File? = withContext(Dispatchers.IO) {
         val workspace = dao.getById(id) ?: return@withContext null
-        runCatching { backendOf(workspace).localAbsoluteFile(path) }
+        runCatching { backendOf(workspace, hostAccess).localAbsoluteFile(path) }
             .getOrNull()
             ?.takeIf { it.isFile }
     }
@@ -315,10 +314,11 @@ class WorkspaceRepository(
         path: String,
         text: String,
         overwrite: Boolean,
+        hostAccess: Boolean = false,
     ): WorkspaceFileEntry {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         return runInterruptible(Dispatchers.IO) {
-            backendOf(workspace).writeAbsoluteText(path, text, overwrite)
+            backendOf(workspace, hostAccess).writeAbsoluteText(path, text, overwrite)
         }
     }
 
@@ -327,7 +327,8 @@ class WorkspaceRepository(
         id: String,
         path: String,
         outputStream: OutputStream,
-    ) = readFromBackend(id) { it.exportAbsoluteFile(path, outputStream) }
+        hostAccess: Boolean = false,
+    ) = readFromBackend(id, hostAccess) { it.exportAbsoluteFile(path, outputStream) }
 
     suspend fun deleteFile(
         id: String,
@@ -345,11 +346,12 @@ class WorkspaceRepository(
         cwd: String = "",
         timeoutMillis: Long = WorkspaceManager.DEFAULT_COMMAND_TIMEOUT_MS,
         stdin: ByteArray? = null,
+        hostAccess: Boolean = false,
     ): WorkspaceCommandResult {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         // runInterruptible 让协程取消转化为线程中断，从而打断阻塞的 Process.waitFor 并杀掉进程
         return runInterruptible(Dispatchers.IO) {
-            backendOf(workspace).executeCommand(command, cwd, timeoutMillis, stdin)
+            backendOf(workspace, hostAccess).executeCommand(command, cwd, timeoutMillis, stdin)
         }
     }
 
@@ -359,7 +361,8 @@ class WorkspaceRepository(
         command: String,
         cwd: String,
         taskId: String,
-    ): WorkspaceBackgroundCommand = withBackend(id) { it.startBackgroundCommand(command, cwd, taskId) }
+        hostAccess: Boolean = false,
+    ): WorkspaceBackgroundCommand = withBackend(id, hostAccess) { it.startBackgroundCommand(command, cwd, taskId) }
 
     suspend fun delete(id: String): Boolean {
         val workspace = dao.getById(id) ?: return false
@@ -393,7 +396,7 @@ class WorkspaceRepository(
         return backend.openShell(columns, rows)
     }
 
-    private fun backendOf(workspace: WorkspaceEntity): WorkspaceBackend =
+    private fun backendOf(workspace: WorkspaceEntity, hostAccess: Boolean = false): WorkspaceBackend =
         if (workspace.isSsh()) {
             val settings = workspace.sshSettings() ?: error("SSH workspace config is missing: ${workspace.id}")
             SshWorkspaceBackend(sshPool, workspace.id, settings.toConnectionConfig())
@@ -401,7 +404,7 @@ class WorkspaceRepository(
             manager.backend(
                 root = workspace.root,
                 shellCompatibilityMode = workspace.shellCompatibilityMode,
-                hostBridgeEnabled = workspace.hostBridgeEnabled(),
+                hostAccess = hostAccess,
             )
         }
 
@@ -532,10 +535,14 @@ class WorkspaceRepository(
      * 读操作: 取消时中断线程, 远程读取卡在网络上时也能及时返回。
      * 中途放弃没有副作用; 写操作被打断会留下写了一半的文件, 走 [withBackend] 照常执行完。
      */
-    private suspend fun <T> readFromBackend(id: String, block: (WorkspaceBackend) -> T): T {
+    private suspend fun <T> readFromBackend(
+        id: String,
+        hostAccess: Boolean = false,
+        block: (WorkspaceBackend) -> T,
+    ): T {
         val workspace = dao.getById(id) ?: error("Workspace not found: $id")
         return try {
-            runInterruptible(Dispatchers.IO) { block(backendOf(workspace)) }
+            runInterruptible(Dispatchers.IO) { block(backendOf(workspace, hostAccess)) }
         } catch (e: Exception) {
             // 被中断的读取会抛出 JSch 包装过的 IO 异常, 已取消时统一按取消处理, 免得被当成连接失败
             currentCoroutineContext().ensureActive()
@@ -543,10 +550,14 @@ class WorkspaceRepository(
         }
     }
 
-    private suspend fun <T> withBackend(id: String, block: (WorkspaceBackend) -> T): T =
+    private suspend fun <T> withBackend(
+        id: String,
+        hostAccess: Boolean = false,
+        block: (WorkspaceBackend) -> T,
+    ): T =
         withContext(Dispatchers.IO) {
             val workspace = dao.getById(id) ?: error("Workspace not found: $id")
-            block(backendOf(workspace))
+            block(backendOf(workspace, hostAccess))
         }
 
     private suspend fun restoreShellState(workspace: WorkspaceEntity) {

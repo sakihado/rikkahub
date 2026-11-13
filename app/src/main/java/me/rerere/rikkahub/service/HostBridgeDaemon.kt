@@ -8,10 +8,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import me.rerere.rikkahub.phoneuse.HostShellExecutor
-import me.rerere.rikkahub.phoneuse.PolicyDecision
-import me.rerere.rikkahub.phoneuse.ShellApprovalStore
-import me.rerere.rikkahub.phoneuse.ShellPolicyEngine
+import me.rerere.rikkahub.hostshell.HostQueryEvaluator
+import me.rerere.rikkahub.hostshell.HostShellExecutor
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -22,20 +20,21 @@ import java.net.Socket
 import java.security.SecureRandom
 
 private const val TAG = "HostBridgeDaemon"
-private const val MAX_REQUEST_BODY_BYTES = 256 * 1024
+private const val MAX_REQUEST_BODY_BYTES = 64 * 1024
 private const val MAX_HEADER_STDERR_BYTES = 6 * 1024
 
 /**
- * 宿主机与 PRoot 工作区之间的特权桥接守护服务（纯 java.net.ServerSocket 实现）
+ * 宿主机与 PRoot 工作区之间的单向只读诊断桥接服务（纯 `java.net.ServerSocket` 无状态实现）。
  *
- * - 仅绑定 127.0.0.1 随机端口，启动时生成 256-bit 随机鉴权 Token 写入 `filesDir/host_bridge/endpoint`。
- * - 当工作区取消命令导致客户端 `curl` 断开连接时，实时感知 Socket EOF 并取消协程强杀宿主侧子进程树。
- * - 统一走 [ShellPolicyEngine]：仅自动执行 `ALLOW`（纯只读采集），`ASK`/`DENY` 返回退出码 126 并引导转用可审批的 `android_shell`。
+ * - 仅绑定 `127.0.0.1` 随机端口，启动时生成 256-bit 随机鉴权 Token 写入 `filesDir/host_bridge/endpoint`
+ *   （仅在当前对话显式开启本机存储与只读状态挂载时，PRoot 才会挂载 `/run/host_bridge`）。
+ * - 与特权智能体的 `android_shell` 及 `ShellApprovalStore` 彻底解耦：
+ *   仅经 [HostQueryEvaluator] 接收无 Shell 元字符的固定只读系统探针指令，并固定以 `asRoot = false`（UID 2000）执行。
+ * - 当工作区取消命令导致客户端断开连接时，实时感知 Socket EOF 并取消协程强杀宿主侧子进程组。
  */
 class HostBridgeDaemon(
     private val bridgeDir: File,
     private val executor: HostShellExecutor,
-    private val approvalStore: ShellApprovalStore = ShellApprovalStore(),
 ) {
     private val token: String = generateToken()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -96,50 +95,45 @@ class HostBridgeDaemon(
                 return
             }
 
-            val asRoot = req.headers["x-as-root"]?.toBooleanStrictOrNull() ?: false
-            val timeoutSec = req.headers["x-timeout-sec"]?.toIntOrNull()?.coerceIn(1, 120) ?: 45
-            val command = req.body.toString(Charsets.UTF_8).trim()
-            if (command.isEmpty()) {
-                writeResponse(sock, 400, 126, ByteArray(0), "host-sh: empty command\n")
+            if (req.oversized) {
+                writeResponse(sock, 413, 126, ByteArray(0), "host-sh: query body too large\n")
                 return
             }
 
-            val policy = ShellPolicyEngine.evaluate(command, asRoot)
-            when (policy.decision) {
-                PolicyDecision.DENY -> {
+            val timeoutSec = req.headers["x-timeout-sec"]?.toIntOrNull()?.coerceIn(1, 120) ?: 45
+            val rawQuery = req.body.toString(Charsets.UTF_8).trim()
+
+            val safeCommand = when (val check = HostQueryEvaluator.evaluate(rawQuery)) {
+                is HostQueryEvaluator.Result.Rejected -> {
                     writeResponse(
                         socket = sock,
                         httpCode = 200,
                         exitCode = 126,
                         stdout = ByteArray(0),
-                        stderr = "[Blocked by Safety Policy] ${policy.reason}\n",
+                        stderr = "[Read-Only Host Probe Rejected] ${check.reason}\n",
                     )
                     return
                 }
+                is HostQueryEvaluator.Result.Allowed -> check.safeQuotedCommand
+            }
 
-                PolicyDecision.ASK -> {
-                    if (!(policy.canRememberInSession && approvalStore.hasApproval(command, asRoot))) {
-                        writeResponse(
-                            socket = sock,
-                            httpCode = 200,
-                            exitCode = 126,
-                            stdout = ByteArray(0),
-                            stderr = "[Approval Required] ${policy.reason}.\n" +
-                                "host-sh inside workspace_shell only auto-executes read-only host queries.\n" +
-                                "Please call the `android_shell` tool directly for this command so the user can approve it in the chat UI.\n",
-                        )
-                        return
-                    }
-                }
-
-                PolicyDecision.ALLOW -> Unit
+            if (!executor.backendState.value.isPrivileged && !executor.ensurePrivilegedAccess(interactive = false)) {
+                writeResponse(
+                    socket = sock,
+                    httpCode = 200,
+                    exitCode = 126,
+                    stdout = ByteArray(0),
+                    stderr = "host-sh: Sui / Shizuku / Root privilege is not active. Grant permission in Sui/Shizuku first.\n",
+                )
+                return
             }
 
             val execJob = scope.async {
                 executor.execute(
-                    command = command,
-                    asRoot = asRoot,
+                    command = safeCommand,
+                    asRoot = false,
                     timeoutMs = timeoutSec * 1000L,
+                    interactiveAuth = false,
                 )
             }
 
@@ -219,6 +213,7 @@ class HostBridgeDaemon(
         val path: String,
         val headers: Map<String, String>,
         val body: ByteArray,
+        val oversized: Boolean = false,
     )
 
     private fun readHttpRequest(input: InputStream): ParsedHttpRequest? {
@@ -238,15 +233,18 @@ class HostBridgeDaemon(
             }
         }
 
-        val contentLength = headers["content-length"]?.toIntOrNull()?.coerceIn(0, MAX_REQUEST_BODY_BYTES) ?: 0
-        val body = ByteArray(contentLength)
+        val rawLength = headers["content-length"]?.toIntOrNull() ?: 0
+        if (rawLength < 0 || rawLength > MAX_REQUEST_BODY_BYTES) {
+            return ParsedHttpRequest(method, path, headers, ByteArray(0), oversized = rawLength > MAX_REQUEST_BODY_BYTES)
+        }
+        val body = ByteArray(rawLength)
         var offset = 0
-        while (offset < contentLength) {
-            val r = input.read(body, offset, contentLength - offset)
+        while (offset < rawLength) {
+            val r = input.read(body, offset, rawLength - offset)
             if (r < 0) break
             offset += r
         }
-        val actualBody = if (offset == contentLength) body else body.copyOf(offset)
+        val actualBody = if (offset == rawLength) body else body.copyOf(offset)
         return ParsedHttpRequest(method, path, headers, actualBody)
     }
 

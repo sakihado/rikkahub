@@ -3,219 +3,207 @@ package me.rerere.workspace
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
-import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets
-import java.nio.file.Files
 
 class WorkspaceManager(
     private val baseDir: File,
-    private val config: WorkspaceConfig = WorkspaceConfig(),
+    private val fileSystem: WorkspaceFileSystem = WorkspaceFileSystem(),
     private val shellRunner: WorkspaceShellRunner = HostShellRunner(),
-    private val bindMounts: List<WorkspaceBindMount> = emptyList(),
+    private val patcher: RootfsPatcher = RootfsPatcher(),
+    val bindMounts: List<WorkspaceBindMount> = emptyList(),
 ) {
-    private val fileSystem = WorkspaceFileSystem(config)
+    /**
+     * 按前缀从长到短匹配, 避免 `/skills` 抢先吃掉 `/skills/builtin` 这类更具体的子挂载。
+     */
+    private val sortedBindMounts: List<WorkspaceBindMount> =
+        bindMounts.sortedByDescending { it.target.trimEnd('/').length }
 
-    // 按 target 长度降序, 保证 /a/b 优先于 /a 匹配
-    private val sortedBindMounts = bindMounts.sortedByDescending { it.target.trimEnd('/').length }
-
-    private fun activeBindMounts(hostBridgeEnabled: Boolean, sorted: Boolean = false): List<WorkspaceBindMount> {
+    private fun activeBindMounts(hostAccess: Boolean, sorted: Boolean = false): List<WorkspaceBindMount> {
         val source = if (sorted) sortedBindMounts else bindMounts
-        return if (hostBridgeEnabled) source else source.filterNot { it.requiresHostBridge }
+        return if (hostAccess) source else source.filterNot { it.sessionHostMount }
     }
 
-    fun layout(hostBridgeEnabled: Boolean = true): WorkspaceLayout = WorkspaceLayout(
-        workspaceDir = ROOTFS_WORKSPACE_DIR,
-        writableRoots = listOf(ROOTFS_WORKSPACE_DIR, "/tmp") +
-            activeBindMounts(hostBridgeEnabled).filter { it.writable }.map { it.target.trimEnd('/') },
-    )
-
-    val layout = layout(hostBridgeEnabled = true)
-
-    init {
-        baseDir.mkdirs()
+    fun layout(hostAccess: Boolean = false): WorkspaceLayout {
+        val active = activeBindMounts(hostAccess)
+        return WorkspaceLayout(
+            workspaceDir = ROOTFS_WORKSPACE_DIR,
+            writableRoots = listOf(ROOTFS_WORKSPACE_DIR, "/tmp") +
+                active.filter { it.access == MountAccess.WRITABLE_AUTO }.map { it.target.trimEnd('/') },
+            readOnlyRoots = active.filter { it.access == MountAccess.READ_ONLY }.map { it.target.trimEnd('/') },
+        )
     }
 
+    val layout = layout(hostAccess = false)
+
+    /** 构造指向本地工作区 [root] 的统一后端 */
     fun backend(
         root: String,
         shellCompatibilityMode: Boolean = false,
-        hostBridgeEnabled: Boolean = true,
+        hostAccess: Boolean = false,
     ): WorkspaceBackend =
-        LocalWorkspaceBackend(this, root, shellCompatibilityMode, hostBridgeEnabled)
+        LocalWorkspaceBackend(this, root, shellCompatibilityMode, hostAccess)
 
-    fun ensureWorkspace(root: String): File {
-        val dir = workspaceDir(root)
-        filesDir(root).mkdirs()
-        linuxDir(root).mkdirs()
-        tempDir(root).mkdirs()
-        return dir
+    fun workspaceDir(root: String): File = File(baseDir, root)
+
+    fun filesDir(root: String): File = File(workspaceDir(root), "files")
+
+    fun linuxDir(root: String): File = File(workspaceDir(root), "linux")
+
+    fun tempDir(root: String): File = File(linuxDir(root), "tmp")
+
+    /**
+     * 清理所有工作区遗留的运行期临时目录 (`linux/tmp`).
+     *
+     * 正常退出时进程会自行清理临时文件, 但应用进程被系统杀死或崩溃时可能残留
+     * PRoot 临时文件、命令输出缓冲或构建中间物. 仅在应用启动早期、尚无任何会话运行时调用.
+     */
+    fun cleanupTempDirs() {
+        val workspaces = baseDir.listFiles() ?: return
+        for (workspace in workspaces) {
+            if (!workspace.isDirectory) continue
+            val tmp = File(workspace, "linux/tmp")
+            if (tmp.isDirectory) {
+                tmp.listFiles()?.forEach { child ->
+                    runCatching { child.deleteRecursively() }
+                }
+            }
+        }
     }
-
-    fun workspaceDir(root: String): File {
-        requireValidRoot(root)
-        return File(baseDir, root)
-    }
-
-    fun filesDir(root: String): File = File(workspaceDir(root), FILES_DIR)
-
-    fun linuxDir(root: String): File = File(workspaceDir(root), LINUX_DIR)
-
-    fun tempDir(root: String): File = File(workspaceDir(root), TEMP_DIR)
 
     fun hasRootfs(root: String): Boolean = isUsableRootfs(linuxDir(root))
 
-    fun rootfsShell(root: String): String = rootfsShell(linuxDir(root))
+    /** 执行命令实际使用的 shell 路径 (如 `/bin/bash` 或 `/bin/sh`) */
+    fun shell(root: String): String = rootfsShell(linuxDir(root))
 
-    fun deleteWorkspace(root: String): Boolean = workspaceDir(root).deleteRecursively()
+    fun ensureWorkspace(root: String) {
+        filesDir(root).mkdirs()
+        linuxDir(root).mkdirs()
+    }
 
-    fun listFiles(
-        root: String,
-        path: String = "",
-        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
-    ): List<WorkspaceFileEntry> =
-        fileSystem.list(areaDir(root, area), path)
+    fun deleteWorkspace(root: String): Boolean {
+        val dir = workspaceDir(root)
+        if (!dir.exists()) return false
+        // 解压出来的 Rootfs 里可能有只读目录 (mode 0555/0500), 不先加写权限 unlink 子项会 EACCES
+        makeTreeWritable(dir)
+        return dir.deleteRecursively()
+    }
 
-    fun readText(
-        root: String,
-        path: String,
-        charset: Charset = StandardCharsets.UTF_8,
-    ): String = fileSystem.readText(filesDir(root), path, charset)
+    fun areaRoot(root: String, area: WorkspaceStorageArea): File = when (area) {
+        WorkspaceStorageArea.FILES -> filesDir(root)
+        WorkspaceStorageArea.LINUX -> linuxDir(root)
+    }
 
-    fun writeText(
-        root: String,
-        path: String,
-        text: String,
-        overwrite: Boolean = true,
-        charset: Charset = StandardCharsets.UTF_8,
-    ): WorkspaceFileEntry = fileSystem.writeText(filesDir(root), path, text, overwrite, charset)
+    fun listFiles(root: String, area: WorkspaceStorageArea, path: String = ""): List<WorkspaceFileEntry> {
+        ensureWorkspace(root)
+        return fileSystem.list(areaRoot(root, area), path)
+    }
+
+    fun readText(root: String, path: String): String {
+        ensureWorkspace(root)
+        return fileSystem.readText(filesDir(root), path)
+    }
+
+    fun writeText(root: String, path: String, text: String, overwrite: Boolean = true): WorkspaceFileEntry {
+        ensureWorkspace(root)
+        return fileSystem.writeText(filesDir(root), path, text, overwrite)
+    }
 
     fun importFile(
         root: String,
+        area: WorkspaceStorageArea,
         destinationPath: String,
-        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
         fileName: String,
         inputStream: InputStream,
     ): WorkspaceFileEntry {
-        val areaRoot = areaDir(root, area)
-        val targetPath = if (destinationPath.isBlank()) fileName else "$destinationPath/$fileName"
-        return fileSystem.importBytes(areaRoot, targetPath, inputStream)
-    }
-
-    fun fileSize(
-        root: String,
-        path: String,
-        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
-    ): Long {
-        val file = fileSystem.resolve(areaDir(root, area), path)
-        require(file.exists()) { "File does not exist: $path" }
-        require(file.isFile) { "Path is not a file: $path" }
-        return file.length()
-    }
-
-    fun resolveFile(
-        root: String,
-        path: String,
-        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
-    ): File {
-        val file = fileSystem.resolve(areaDir(root, area), path)
-        require(file.exists()) { "File does not exist: $path" }
-        require(file.isFile) { "Path is not a file: $path" }
-        return file
+        ensureWorkspace(root)
+        return fileSystem.importStream(areaRoot(root, area), destinationPath, fileName, inputStream)
     }
 
     fun exportFile(
         root: String,
+        area: WorkspaceStorageArea,
         path: String,
-        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
         outputStream: OutputStream,
     ) {
-        val file = fileSystem.resolve(areaDir(root, area), path)
-        require(file.exists()) { "File does not exist: $path" }
-        require(file.isFile) { "Path is not a file: $path" }
-        outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
+        ensureWorkspace(root)
+        fileSystem.exportStream(areaRoot(root, area), path, outputStream)
     }
 
+    fun fileSize(root: String, area: WorkspaceStorageArea, path: String): Long {
+        ensureWorkspace(root)
+        return fileSystem.fileSize(areaRoot(root, area), path)
+    }
+
+    /** Rootfs 内绝对路径在宿主机上的落点: 对应的宿主目录和目录内的相对路径 */
+    data class RootfsLocation(val rootDir: File, val relativePath: String)
+
     /**
-     * 把 Rootfs 内的绝对路径映射到宿主机上的真实文件。
-     *
-     * bind mount 的 source 本身就是 Android 侧的普通目录, 因此 /skills 这类挂载路径
-     * 可以直接用文件 IO 访问, 无需经过 PRoot; 只是 Rootfs 目录里对应位置是个空挂载点,
-     * 按 [WorkspaceStorageArea.LINUX] 解析必然落空。
+     * 把 Rootfs 内的绝对路径映射到宿主机目录:
+     * 优先匹配 `/workspace` 和当前生效的 [bindMounts], 其余落回 `linuxDir`。
+     * 内核伪文件系统 (如 `/proc`) 直接报错引导用 `workspace_shell` 读取。
      */
-    fun resolveRootfsPath(root: String, path: String, hostBridgeEnabled: Boolean = true): RootfsLocation {
-        val trimmed = path.trim().trimEnd('/').ifBlank { "/" }
-        require(trimmed.startsWith("/")) { "Rootfs path must be absolute: $path" }
-
-        activeBindMounts(hostBridgeEnabled, sorted = true).forEach { mount ->
-            val target = mount.target.trimEnd('/')
-            if (trimmed == target) return RootfsLocation(mount.source, "")
-            if (trimmed.startsWith("$target/")) {
-                return RootfsLocation(mount.source, trimmed.removePrefix("$target/"))
-            }
+    fun resolveRootfsPath(root: String, path: String, hostAccess: Boolean = false): RootfsLocation {
+        val trimmed = path.trim()
+        require(trimmed.startsWith("/")) { "Path must be an absolute path inside Rootfs: $path" }
+        trimmed.matchingMount(ROOTFS_WORKSPACE_DIR)?.let { return RootfsLocation(filesDir(root), it) }
+        activeBindMounts(hostAccess, sorted = true).forEach { mount ->
+            trimmed.matchingMount(mount.target)?.let { return RootfsLocation(mount.source, it) }
         }
-
-        if (trimmed == ROOTFS_WORKSPACE_DIR || trimmed.startsWith("$ROOTFS_WORKSPACE_DIR/")) {
-            return RootfsLocation(
-                rootDir = filesDir(root),
-                relativePath = trimmed.removePrefix(ROOTFS_WORKSPACE_DIR).trimStart('/'),
-            )
-        }
-
-        // 内核伪文件系统: 显式拒绝, 而不是回落到一个必然读不到的物理路径
-        KERNEL_FS_MOUNTS.firstOrNull { trimmed == it || trimmed.startsWith("$it/") }?.let {
+        KERNEL_FS_MOUNTS.firstOrNull { trimmed.matchingMount(it) != null }?.let {
             error("$it is a kernel filesystem and cannot be read as a file, use workspace_shell instead")
         }
-
         return RootfsLocation(linuxDir(root), trimmed.trimStart('/'))
     }
 
-    fun rootfsFileSize(root: String, path: String, hostBridgeEnabled: Boolean = true): Long =
-        resolveRootfsFile(root, path, hostBridgeEnabled).also { it.requireReadableFile(path) }.length()
+    /** 命中挂载点时返回挂载点内的相对路径, 未命中返回 null; 按路径段边界匹配 */
+    private fun String.matchingMount(mountPoint: String): String? {
+        val mp = mountPoint.trimEnd('/')
+        return when {
+            this == mp -> ""
+            startsWith("$mp/") -> removePrefix("$mp/").trimStart('/')
+            else -> null
+        }
+    }
+
+    fun rootfsFileSize(root: String, path: String, hostAccess: Boolean = false): Long =
+        resolveRootfsFile(root, path, hostAccess).also { it.requireReadableFile(path) }.length()
 
     fun exportRootfsFile(
         root: String,
         path: String,
         outputStream: OutputStream,
-        hostBridgeEnabled: Boolean = true,
+        hostAccess: Boolean = false,
     ) {
-        val file = resolveRootfsFile(root, path, hostBridgeEnabled)
+        val file = resolveRootfsFile(root, path, hostAccess)
         file.requireReadableFile(path)
-        outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
+        file.inputStream().use { it.copyTo(outputStream) }
     }
 
-    /** Rootfs 内绝对路径对应的宿主机文件, 不检查是否存在 */
-    fun resolveRootfsFile(root: String, path: String, hostBridgeEnabled: Boolean = true): File {
-        val location = resolveRootfsPath(root, path, hostBridgeEnabled)
+    /** 解析 Rootfs 内绝对路径到宿主机上的真实 [File] (会校验不越出所属的挂载根) */
+    fun resolveRootfsFile(root: String, path: String, hostAccess: Boolean = false): File {
+        val location = resolveRootfsPath(root, path, hostAccess)
+        ensureWorkspace(root)
         return fileSystem.resolve(location.rootDir, location.relativePath)
     }
 
-    private fun File.requireReadableFile(path: String) {
-        require(exists()) { "File does not exist: $path" }
-        require(isFile) { "Path is not a file: $path" }
+    private fun File.requireReadableFile(displayPath: String) {
+        require(exists()) { "File does not exist: $displayPath" }
+        require(isFile) { "Path is not a file: $displayPath" }
+    }
+
+    fun resolveFile(root: String, area: WorkspaceStorageArea, path: String): File {
+        ensureWorkspace(root)
+        return fileSystem.resolve(areaRoot(root, area), path)
     }
 
     fun deleteFile(
         root: String,
+        area: WorkspaceStorageArea,
         path: String,
         recursive: Boolean = false,
-        area: WorkspaceStorageArea = WorkspaceStorageArea.FILES,
-    ): Boolean =
-        fileSystem.delete(areaDir(root, area), path, recursive)
-
-    fun moveFile(root: String, source: String, target: String, overwrite: Boolean = false): WorkspaceFileEntry =
-        fileSystem.move(filesDir(root), source, target, overwrite)
-
-    fun glob(root: String, pattern: String, path: String = ""): List<WorkspaceFileEntry> =
-        fileSystem.glob(filesDir(root), pattern, path)
-
-    fun grep(
-        root: String,
-        query: String,
-        path: String = "",
-        regex: Boolean = false,
-        ignoreCase: Boolean = true,
-        includeGlob: String? = null,
-    ): List<WorkspaceSearchMatch> =
-        fileSystem.grep(filesDir(root), query, path, regex, ignoreCase, includeGlob)
+    ): Boolean {
+        ensureWorkspace(root)
+        return fileSystem.delete(areaRoot(root, area), path, recursive)
+    }
 
     fun executeCommand(
         root: String,
@@ -224,9 +212,9 @@ class WorkspaceManager(
         timeoutMillis: Long = DEFAULT_COMMAND_TIMEOUT_MS,
         stdin: ByteArray? = null,
         shellCompatibilityMode: Boolean = false,
-        hostBridgeEnabled: Boolean = true,
+        hostAccess: Boolean = false,
     ): WorkspaceCommandResult =
-        shellRunner.execute(shellContext(root, command, cwd, timeoutMillis, stdin, shellCompatibilityMode, hostBridgeEnabled))
+        shellRunner.execute(shellContext(root, command, cwd, timeoutMillis, stdin, shellCompatibilityMode, hostAccess))
 
     fun startBackgroundCommand(
         root: String,
@@ -234,9 +222,9 @@ class WorkspaceManager(
         cwd: String,
         id: String,
         shellCompatibilityMode: Boolean = false,
-        hostBridgeEnabled: Boolean = true,
+        hostAccess: Boolean = false,
     ): WorkspaceBackgroundCommand =
-        shellRunner.startBackground(shellContext(root, command, cwd, 0, null, shellCompatibilityMode, hostBridgeEnabled), id)
+        shellRunner.startBackground(shellContext(root, command, cwd, 0, null, shellCompatibilityMode, hostAccess), id)
 
     private fun shellContext(
         root: String,
@@ -245,114 +233,87 @@ class WorkspaceManager(
         timeoutMillis: Long,
         stdin: ByteArray?,
         shellCompatibilityMode: Boolean,
-        hostBridgeEnabled: Boolean = true,
+        hostAccess: Boolean,
     ): WorkspaceShellContext {
-        require(command.isNotBlank()) { "Command is required" }
-        val workingDir = fileSystem.resolve(filesDir(root), cwd)
-        require(workingDir.exists()) { "Working directory does not exist: $cwd" }
-        require(workingDir.isDirectory) { "Working path is not a directory: $cwd" }
-
+        ensureWorkspace(root)
+        val files = filesDir(root)
+        val workingDir = if (cwd.isBlank()) files else fileSystem.resolve(files, cwd)
+        require(workingDir.exists() && workingDir.isDirectory) {
+            "Working directory does not exist: $cwd"
+        }
         return WorkspaceShellContext(
             root = root,
             command = command,
             cwd = cwd,
-            filesDir = filesDir(root),
+            filesDir = files,
             linuxDir = linuxDir(root),
             tempDir = tempDir(root),
             workingDir = workingDir,
             timeoutMillis = timeoutMillis,
             stdin = stdin,
-            bindMounts = activeBindMounts(hostBridgeEnabled),
+            bindMounts = activeBindMounts(hostAccess),
             shellCompatibilityMode = shellCompatibilityMode,
         )
     }
 
-    /** 交互式终端启动前的准备: 补齐目录, 并按当前网络刷新 Rootfs 的 DNS 等配置 */
-    fun prepareTerminal(root: String, nameservers: List<String>, hostBridgeEnabled: Boolean = true) {
+    /** 交互式终端启动前的磁盘准备, 避免放到主线程做 I/O */
+    fun prepareTerminal(root: String, nameservers: List<String>, hostAccess: Boolean = false) {
         ensureWorkspace(root)
-        activeBindMounts(hostBridgeEnabled).forEach { mount ->
-            if (mount.writable || !mount.source.exists()) {
-                runCatching { mount.source.mkdirs() }
-            }
+        activeBindMounts(hostAccess).forEach { mount ->
+            if (!mount.sessionHostMount) mount.source.mkdirs()
         }
-        RootfsPatcher().patch(linuxDir(root), RootfsPatchOptions(nameservers = nameservers))
+        tempDir(root).mkdirs()
+        patcher.patch(linuxDir(root), nameservers)
     }
 
+    /** 构造交互式终端的启动参数, 当前 runner 不支持时返回 null */
     fun terminalLaunch(
         root: String,
         shellCompatibilityMode: Boolean,
-        hostBridgeEnabled: Boolean = true,
+        hostAccess: Boolean = false,
     ): WorkspaceTerminalLaunch? =
         shellRunner.terminalLaunch(
             WorkspaceTerminalContext(
                 filesDir = filesDir(root),
                 linuxDir = linuxDir(root),
                 tempDir = tempDir(root),
-                bindMounts = activeBindMounts(hostBridgeEnabled),
+                bindMounts = activeBindMounts(hostAccess),
                 shellCompatibilityMode = shellCompatibilityMode,
             )
         )
 
-    private fun requireValidRoot(root: String) {
-        require(root.matches(ROOT_NAME_REGEX)) {
-            "Invalid workspace root name: $root"
-        }
-    }
-
-    private fun areaDir(root: String, area: WorkspaceStorageArea): File = when (area) {
-        WorkspaceStorageArea.FILES -> filesDir(root)
-        WorkspaceStorageArea.LINUX -> linuxDir(root)
-    }
-
-    fun cleanupAllTempDirs() {
-        val roots = baseDir.listFiles()?.filter { it.isDirectory } ?: return
-        for (dir in roots) {
-            val root = dir.name
-            if (!root.matches(ROOT_NAME_REGEX)) continue
-            // PRoot temp files
-            tempDir(root).let { if (it.exists()) it.deleteRecursively() }
-            // Rootfs /tmp and /var/tmp
-            File(linuxDir(root), "tmp").let { if (it.exists()) it.deleteRecursively() }
-            File(linuxDir(root), "var/tmp").let { if (it.exists()) it.deleteRecursively() }
-        }
-    }
-
     companion object {
-        private const val FILES_DIR = "files"
-        private const val LINUX_DIR = "linux"
-        private const val TEMP_DIR = "tmp"
         const val DEFAULT_COMMAND_TIMEOUT_MS = 30_000L
 
-        /** Rootfs 内工作区文件区的挂载点 */
+        /** 工作区文件区在 Rootfs 内的挂载路径 */
         const val ROOTFS_WORKSPACE_DIR = "/workspace"
 
-        /** Rootfs 内执行命令时的 HOME */
+        /** Rootfs 内默认用户的 HOME 目录 */
         const val ROOTFS_HOME_DIR = "/root"
 
-        /** 由宿主机透传的内核伪文件系统, 只能通过 shell 访问 */
+        /** PRoot 运行时绑定进 Rootfs 的宿主机内核/设备伪文件系统 */
         val KERNEL_FS_MOUNTS = listOf("/dev", "/proc", "/sys")
 
-        private val ROOT_NAME_REGEX = Regex("[A-Za-z0-9._-]+")
-
-        /** Rootfs 是否可用, 以 /bin/sh 存在为准 */
+        /**
+         * 判断 [linuxDir] 里装的是不是一个能启动的 Rootfs:
+         * 兼容 usr-merge (`bin` 是指向 `usr/bin` 的符号链接) 与传统目录布局。
+         */
         fun isUsableRootfs(linuxDir: File): Boolean =
-            linuxDir.isDirectory && linuxDir.hasRootfsEntry("bin/sh")
+            ROOTFS_SHELLS.any { File(linuxDir, it.trimStart('/')).exists() }
 
-        /** Rootfs 内使用的 shell: 优先 bash, 没有时 (如 Alpine minirootfs) 回退到 /bin/sh */
+        /** 优先用 bash (Ubuntu/Debian), 没有就退回 POSIX sh (Alpine 等精简镜像) */
         fun rootfsShell(linuxDir: File): String =
-            if (linuxDir.hasRootfsEntry("bin/bash")) "/bin/bash" else "/bin/sh"
+            ROOTFS_SHELLS.firstOrNull { File(linuxDir, it.trimStart('/')).exists() } ?: "/bin/sh"
 
-        // Alpine 等发行版的 /bin/sh 是指向 /bin/busybox 的绝对路径软链, 在宿主机上解析不到目标,
-        // 只有 proot 内才能正确解析, 所以软链本身存在即视为存在
-        private fun File.hasRootfsEntry(path: String): Boolean {
-            val entry = File(this, path)
-            return entry.isFile || Files.isSymbolicLink(entry.toPath())
+        private val ROOTFS_SHELLS = listOf("/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh")
+
+        private fun makeTreeWritable(file: File) {
+            // 跳过符号链接: Java 的 setWritable 会跟随链接改到目标上, 且死链接会失败
+            if (java.nio.file.Files.isSymbolicLink(file.toPath())) return
+            file.setWritable(true)
+            if (file.isDirectory) {
+                file.listFiles()?.forEach(::makeTreeWritable)
+            }
         }
     }
 }
-
-/** Rootfs 内绝对路径在宿主机上的落点 */
-data class RootfsLocation(
-    val rootDir: File,
-    val relativePath: String,
-)

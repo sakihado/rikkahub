@@ -407,6 +407,7 @@ private fun ChatPageContent(
                     onResumeMessageQueue = vm::resumeMessageQueue,
                     runningBackgroundTasks = backgroundTasks.count { it.status == BackgroundShellStatus.RUNNING },
                     onShowBackgroundTasks = { showBackgroundTasks = true },
+                    workspaceHostAccess = conversation.workspaceHostAccess,
                     loading = loadingJob != null,
                     settings = setting,
                     assistant = assistant,
@@ -607,6 +608,7 @@ private fun ChatFilesPickerSheet(
             onTrimHistory = vm::handleTrimHistory,
             onUpdateAssistant = vm::updateAssistant,
             onUpdateWorkspaceCwd = vm::updateWorkspaceCwd,
+            onUpdateWorkspaceHostAccess = vm::updateWorkspaceHostAccess,
             onUpdateSearchMode = { mode ->
                 vm.updateSearch(
                     enableWebSearch = mode == SearchMode.LOCAL,

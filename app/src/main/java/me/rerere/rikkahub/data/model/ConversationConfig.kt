@@ -26,6 +26,8 @@ data class ConversationConfig(
     val mcpServers: Set<Uuid> = emptySet(),
     val workspaceId: Uuid? = null,
     val enabledSkills: Set<String> = emptySet(),
+    /** 当前会话是否开启本地工作区的宿主机只读存储 (/sdcard) 与只读状态探针 (host-sh)，默认关闭 */
+    val workspaceHostAccess: Boolean = false,
 )
 
 // 内置搜索是模型的开关，不在助手上，由调用方另行填入
@@ -59,6 +61,8 @@ fun Assistant.withConversation(conversation: Conversation): Assistant {
 /** 聊天页改动助手后留在会话上的部分，[updated] 是会话视角下改动后的助手。 */
 fun Conversation.withAssistantUpdate(updated: Assistant, settings: Settings): Conversation {
     val previous = settings.getAssistantOf(this)
+    val workspaceChanged = updated.workspaceId != previous.workspaceId
+    val effectiveHostAccess = if (workspaceChanged) false else workspaceHostAccess
     val config = config
     val conversation = if (config == null) {
         this
@@ -70,14 +74,19 @@ fun Conversation.withAssistantUpdate(updated: Assistant, settings: Settings): Co
                 } else {
                     // 内置搜索是模型自身的能力，换模型后跟随新模型的开关
                     settings.findModelById(updated.chatModelId)?.tools?.contains(BuiltInTools.Search) == true
-                }
+                },
+                workspaceHostAccess = effectiveHostAccess,
             ),
             modeInjectionIds = updated.modeInjectionIds,
             lorebookIds = updated.lorebookIds,
         )
     }
-    // 工作目录属于原来的工作区，换工作区后失效
-    return if (updated.workspaceId != previous.workspaceId) conversation.copy(workspaceCwd = null) else conversation
+    // 工作目录与本机只读存储挂载均属于原工作区的会话状态，换工作区后自动重置
+    return if (workspaceChanged) {
+        conversation.copy(workspaceCwd = null, workspaceHostAccess = false)
+    } else {
+        conversation
+    }
 }
 
 /** 聊天页改动助手后写回助手设置的部分：会话持有的字段保持 [stored] 的原值。 */
@@ -121,19 +130,36 @@ fun Settings.getChatModelOf(conversation: Conversation): Model? {
 
 /**
  * 把助手当前的配置固定到会话上。已经固定过的会话原样返回，
- * 只有固定的模型被删除时才改为固定助手当前的模型，之后不再跟着助手变。
+ * 只有固定的模型被删除或会话级宿主机访问状态尚未同步时才更新配置。
  */
 fun Conversation.bindConfig(settings: Settings): Conversation {
     val model = settings.getChatModelOf(this)
     val builtInSearch = model != null && BuiltInTools.Search in model.tools
     val config = config
     if (config != null) {
-        if (model == null || model.id == config.chatModelId) return this
-        return copy(config = config.copy(chatModelId = model.id, builtInSearch = builtInSearch))
+        val targetModelId = model?.id ?: config.chatModelId
+        val targetBuiltInSearch = if (model == null || model.id == config.chatModelId) config.builtInSearch else builtInSearch
+        if (targetModelId == config.chatModelId &&
+            targetBuiltInSearch == config.builtInSearch &&
+            config.workspaceHostAccess == workspaceHostAccess
+        ) {
+            return this
+        }
+        return copy(
+            config = config.copy(
+                chatModelId = targetModelId,
+                builtInSearch = targetBuiltInSearch,
+                workspaceHostAccess = workspaceHostAccess,
+            )
+        )
     }
     val assistant = settings.getAssistantOf(this)
     return copy(
-        config = assistant.toConversationConfig().copy(chatModelId = model?.id, builtInSearch = builtInSearch),
+        config = assistant.toConversationConfig().copy(
+            chatModelId = model?.id,
+            builtInSearch = builtInSearch,
+            workspaceHostAccess = workspaceHostAccess,
+        ),
         // 旧版本允许会话单独绑定注入，这类会话保留自己的绑定
         modeInjectionIds = modeInjectionIds.ifEmpty { assistant.modeInjectionIds },
         lorebookIds = lorebookIds.ifEmpty { assistant.lorebookIds },

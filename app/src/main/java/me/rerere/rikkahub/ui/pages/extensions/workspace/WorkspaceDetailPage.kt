@@ -107,6 +107,7 @@ import me.rerere.hugeicons.stroke.Tag01
 import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.Wrench01
 import me.rerere.rikkahub.Screen
+import me.rerere.rikkahub.data.ai.tools.WORKSPACE_EXPORT_FILE_TOOL_NAME
 import me.rerere.rikkahub.data.ai.tools.WorkspaceFileWriteToolNames
 import me.rerere.rikkahub.data.ai.tools.resolveWorkspaceToolApproval
 import me.rerere.rikkahub.data.db.entity.WorkspaceEntity
@@ -256,7 +257,6 @@ fun WorkspaceDetailPage(id: String) {
                         onInstallRootfs = { showInstallDialog = true },
                         onToolApprovalChange = vm::setToolApproval,
                         onShellCompatibilityModeChange = vm::setShellCompatibilityMode,
-                        onHostBridgeEnabledChange = vm::setHostBridgeEnabled,
                         onEditSsh = { navController.navigate(Screen.WorkspaceSshEditor(id)) },
                     )
 
@@ -416,7 +416,6 @@ private fun WorkspaceBasicPage(
     onInstallRootfs: () -> Unit,
     onToolApprovalChange: (String, Boolean) -> Unit,
     onShellCompatibilityModeChange: (Boolean) -> Unit,
-    onHostBridgeEnabledChange: (Boolean) -> Unit,
     onEditSsh: () -> Unit,
 ) {
     val shellStatus = workspace?.shellStatus
@@ -496,18 +495,6 @@ private fun WorkspaceBasicPage(
                         leadingContent = { CardGroupIcon(HugeIcons.Wrench01) },
                         headlineContent = { Text(stringResource(R.string.workspace_detail_compatibility_mode)) },
                     )
-                    if (!me.rerere.rikkahub.BuildConfig.IS_PLAY_STORE) {
-                        switchItem(
-                            checked = workspace?.hostBridgeEnabled() ?: true,
-                            onCheckedChange = onHostBridgeEnabledChange,
-                            enabled = workspace != null,
-                            supportingContent = {
-                                Text(stringResource(R.string.workspace_detail_host_bridge_desc))
-                            },
-                            leadingContent = { CardGroupIcon(HugeIcons.FolderOpen) },
-                            headlineContent = { Text(stringResource(R.string.workspace_detail_host_bridge)) },
-                        )
-                    }
                 }
             }
         }
@@ -638,6 +625,11 @@ private fun workspaceToolApprovalItems() = listOf(
     Triple("workspace_write_file", stringResource(R.string.workspace_detail_tool_write_file), HugeIcons.PencilEdit01),
     Triple("workspace_edit_file", stringResource(R.string.workspace_detail_tool_edit_file), HugeIcons.FileEdit),
     Triple("workspace_shell", stringResource(R.string.workspace_detail_tool_shell), HugeIcons.ComputerTerminal01),
+    Triple(
+        WORKSPACE_EXPORT_FILE_TOOL_NAME,
+        stringResource(R.string.workspace_detail_tool_export_file),
+        HugeIcons.FileExport,
+    ),
 )
 
 @Composable

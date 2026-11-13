@@ -36,10 +36,12 @@ import me.rerere.rikkahub.ui.components.richtext.CodeHighlightText
 import androidx.compose.ui.res.stringResource
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ComputerTerminal01
+import me.rerere.hugeicons.stroke.Download01
 import me.rerere.hugeicons.stroke.FileAdd
 import me.rerere.hugeicons.stroke.FileEdit
 import me.rerere.hugeicons.stroke.FileView
 import me.rerere.rikkahub.R
+import me.rerere.rikkahub.data.ai.tools.WORKSPACE_EXPORT_FILE_TOOL_NAME
 import me.rerere.rikkahub.service.BackgroundShellManager
 import me.rerere.rikkahub.service.BackgroundShellStatus
 import me.rerere.rikkahub.ui.components.ai.BackgroundTaskLog
@@ -442,6 +444,55 @@ private fun BackgroundTaskPreviewLog(taskId: String) {
 }
 
 /** Shell 退出状态文本: exit code 为 0 显示绿色, 超时或非零显示错误色 */
+/**
+ * 工作空间导出文件到手机 `Download/RikkaHub`: 折叠显示导出目标文件名, 展开显示源路径与目标路径
+ */
+object ExportFileToolUI : ToolUIRenderer {
+    override val toolName: String = WORKSPACE_EXPORT_FILE_TOOL_NAME
+
+    override fun icon(context: ToolUIContext): ImageVector = HugeIcons.Download01
+
+    @Composable
+    override fun title(context: ToolUIContext): String {
+        val sourcePath = context.arguments.getStringContent("source_path")
+        val targetName = context.content.getStringContent("fileName")
+            ?: context.arguments.getStringContent("file_name")?.takeIf { it.isNotBlank() }
+            ?: sourcePath?.substringAfterLast('/')
+            ?: ""
+        return stringResource(R.string.tool_ui_export_file_title, targetName)
+    }
+
+    override fun hasSummary(context: ToolUIContext): Boolean =
+        context.arguments.getStringContent("source_path")?.isNotBlank() == true
+
+    @Composable
+    override fun Summary(context: ToolUIContext) {
+        val sourcePath = context.arguments.getStringContent("source_path").orEmpty()
+        val exportedPath = context.content.getStringContent("exportedPath")
+            ?: context.arguments.getStringContent("file_name")?.takeIf { it.isNotBlank() }
+                ?.let { "/sdcard/Download/RikkaHub/$it" }
+            ?: "/sdcard/Download/RikkaHub/${sourcePath.substringAfterLast('/')}"
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.small)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text(
+                text = "$sourcePath  →  $exportedPath",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
 @Composable
 private fun ShellExitStatus(content: JsonElement, style: androidx.compose.ui.text.TextStyle) {
     val taskId = content.getStringContent("taskId")

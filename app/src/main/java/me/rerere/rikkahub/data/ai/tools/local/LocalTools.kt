@@ -7,13 +7,14 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.files.FilesManager
-import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
-import me.rerere.rikkahub.phoneuse.HostShellExecutor
+import me.rerere.rikkahub.hostshell.HostPrivilegeManager
+import me.rerere.rikkahub.hostshell.HostShellExecutor
+import me.rerere.rikkahub.hostshell.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
-import me.rerere.rikkahub.phoneuse.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
 import me.rerere.tts.provider.TTSManager
 import java.io.File
+import kotlin.uuid.Uuid
 
 class LocalTools(
     private val context: Context,
@@ -26,6 +27,10 @@ class LocalTools(
     private val hostShellExecutor: HostShellExecutor,
     private val shellApprovalStore: ShellApprovalStore,
 ) {
+    private val toolOutputsDir by lazy {
+        File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() }
+    }
+
     val javascriptTool by lazy { buildJavascriptTool() }
 
     val timeTool by lazy { buildTimeInfoTool() }
@@ -62,15 +67,7 @@ class LocalTools(
         )
     }
 
-    val androidShellTool by lazy {
-        buildAndroidShellTool(
-            executor = hostShellExecutor,
-            approvalStore = shellApprovalStore,
-            toolOutputsDir = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
-        )
-    }
-
-    fun getTools(options: List<LocalToolOption>): List<Tool> {
+    fun getTools(options: List<LocalToolOption>, conversationId: Uuid): List<Tool> {
         val tools = mutableListOf<Tool>()
         if (options.contains(LocalToolOption.JavascriptEngine)) {
             tools.add(javascriptTool)
@@ -102,7 +99,14 @@ class LocalTools(
             tools.add(phoneUseTool)
         }
         if (options.contains(LocalToolOption.AndroidShell) && !BuildConfig.IS_PLAY_STORE) {
-            tools.add(androidShellTool)
+            tools.add(
+                buildAndroidShellTool(
+                    executor = hostShellExecutor,
+                    approvalStore = shellApprovalStore,
+                    toolOutputsDir = toolOutputsDir,
+                    conversationId = conversationId,
+                )
+            )
         }
         return tools
     }
@@ -111,5 +115,9 @@ class LocalTools(
         if (!BuildConfig.IS_PLAY_STORE && !hostPrivilegeManager.backendState.value.isPrivileged) {
             hostPrivilegeManager.ensurePrivilegedAccess(interactive = false)
         }
+    }
+
+    fun clearConversationApprovals(conversationId: Uuid) {
+        shellApprovalStore.clearConversation(conversationId.toString())
     }
 }

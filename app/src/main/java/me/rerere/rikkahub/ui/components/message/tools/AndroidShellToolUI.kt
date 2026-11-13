@@ -30,7 +30,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.ai.tools.local.ANDROID_SHELL_TOOL_NAME
-import me.rerere.rikkahub.phoneuse.ShellPolicyEngine
+import me.rerere.rikkahub.hostshell.ShellPolicyEngine
 import me.rerere.rikkahub.ui.components.richtext.HighlightCodeBlock
 import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.utils.jsonPrimitiveOrNull

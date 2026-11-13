@@ -410,6 +410,12 @@ class ChatVM(
         }
     }
 
+    fun updateWorkspaceHostAccess(enabled: Boolean) {
+        viewModelScope.launch {
+            chatService.updateWorkspaceHostAccess(_conversationId, enabled)
+        }
+    }
+
     fun toggleMessageFavorite(node: MessageNode) {
         viewModelScope.launch {
             val currentlyFavorited = favoriteRepository.isNodeFavorited(_conversationId, node.id)

@@ -9,11 +9,11 @@ import me.rerere.rikkahub.data.ai.ChatRequestFactory
 import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
 import me.rerere.rikkahub.data.event.AppEventBus
-import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
-import me.rerere.rikkahub.phoneuse.HostShellExecutor
+import me.rerere.rikkahub.hostshell.HostPrivilegeManager
+import me.rerere.rikkahub.hostshell.HostShellExecutor
+import me.rerere.rikkahub.hostshell.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.RootPhoneController
-import me.rerere.rikkahub.phoneuse.ShellApprovalStore
 import me.rerere.rikkahub.service.BackgroundShellManager
 import me.rerere.rikkahub.service.ChatFloatingTracker
 import me.rerere.rikkahub.service.ChatNotificationManager
@@ -70,7 +70,6 @@ val appModule = module {
         HostBridgeDaemon(
             bridgeDir = File(context.filesDir, "host_bridge"),
             executor = get(),
-            approvalStore = get(),
         )
     }
 
@@ -191,6 +190,8 @@ val appModule = module {
             filesManager = get(),
             folderRepository = get(),
             backgroundShellManager = get(),
+            hostPrivilegeManager = get(),
+            shellApprovalStore = get(),
         )
     }
 

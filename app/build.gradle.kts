@@ -256,7 +256,7 @@ abstract class CompileShelldropJniLibsTask : DefaultTask() {
     }
 }
 
-abstract class CompileSafeSdcardAssetsTask : DefaultTask() {
+abstract class CompileSdcardRoAssetsTask : DefaultTask() {
     @get:InputFile
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val scriptFile: RegularFileProperty
@@ -275,12 +275,12 @@ abstract class CompileSafeSdcardAssetsTask : DefaultTask() {
     fun compile() {
         val outRoot = outputDir.get().asFile
         outRoot.deleteRecursively()
-        val safesdcardDir = File(outRoot, "safesdcard").apply { mkdirs() }
+        val sdcardRoDir = File(outRoot, "sdcard_ro").apply { mkdirs() }
 
         val proc = ProcessBuilder(
             "bash",
             scriptFile.get().asFile.absolutePath,
-            safesdcardDir.absolutePath,
+            sdcardRoDir.absolutePath,
         ).redirectErrorStream(true).start()
         val log = proc.inputStream.bufferedReader().readText()
         val exit = proc.waitFor()
@@ -288,15 +288,15 @@ abstract class CompileSafeSdcardAssetsTask : DefaultTask() {
             logger.lifecycle(log.trim())
         }
         if (exit != 0) {
-            throw GradleException("build-safesdcard.sh failed (exit $exit):\n$log")
+            throw GradleException("build-sdcard-ro.sh failed (exit $exit):\n$log")
         }
 
         if (requireOutputs.get()) {
-            listOf("libsafesdcard_arm64.so", "libsafesdcard_x86_64.so").forEach { name ->
-                val f = File(safesdcardDir, name)
+            listOf("libsdcard_ro_arm64.so", "libsdcard_ro_x86_64.so").forEach { name ->
+                val f = File(sdcardRoDir, name)
                 if (!f.isFile || f.length() == 0L) {
                     throw GradleException(
-                        "Required PRoot trash-guard library missing: ${f.absolutePath}. " +
+                        "Required PRoot read-only guard library missing: ${f.absolutePath}. " +
                             "Install gcc & gcc-aarch64-linux-gnu on the build host."
                     )
                 }
@@ -318,15 +318,15 @@ val compileShelldropJniLibs = tasks.register<CompileShelldropJniLibsTask>("compi
     outputDir.set(project.layout.buildDirectory.dir("generated/shelldropJniLibs"))
 }
 
-val compileSafeSdcardAssets = tasks.register<CompileSafeSdcardAssetsTask>("compileSafeSdcardAssets") {
-    scriptFile.set(rootProject.layout.projectDirectory.file("workspace/safesdcard/build-safesdcard.sh"))
-    sourceFile.set(rootProject.layout.projectDirectory.file("workspace/safesdcard/safesdcard.c"))
+val compileSdcardRoAssets = tasks.register<CompileSdcardRoAssetsTask>("compileSdcardRoAssets") {
+    scriptFile.set(rootProject.layout.projectDirectory.file("workspace/sdcard_ro/build-sdcard-ro.sh"))
+    sourceFile.set(rootProject.layout.projectDirectory.file("workspace/sdcard_ro/sdcard_ro.c"))
     requireOutputs.set(
-        providers.gradleProperty("requireSafeSdcard")
+        providers.gradleProperty("requireSdcardRo")
             .map { it.equals("true", ignoreCase = true) }
             .orElse(false)
     )
-    outputDir.set(project.layout.buildDirectory.dir("generated/safesdcardAssets"))
+    outputDir.set(project.layout.buildDirectory.dir("generated/sdcardRoAssets"))
 }
 
 androidComponents {
@@ -339,8 +339,8 @@ androidComponents {
             CompileShelldropJniLibsTask::outputDir,
         )
         variant.sources.assets?.addGeneratedSourceDirectory(
-            compileSafeSdcardAssets,
-            CompileSafeSdcardAssetsTask::outputDir,
+            compileSdcardRoAssets,
+            CompileSdcardRoAssetsTask::outputDir,
         )
     }
 }

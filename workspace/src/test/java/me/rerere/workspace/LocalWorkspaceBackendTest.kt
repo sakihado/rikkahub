@@ -2,6 +2,7 @@ package me.rerere.workspace
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -22,25 +23,47 @@ class LocalWorkspaceBackendTest {
             baseDir = tempFolder.newFolder("workspaces"),
             shellRunner = shellRunner,
             bindMounts = listOf(
-                WorkspaceBindMount(source = skillsDir, target = "/skills", writable = true),
-                WorkspaceBindMount(source = uploadDir, target = "/upload"),
+                WorkspaceBindMount(source = skillsDir, target = "/skills", access = MountAccess.WRITABLE_AUTO),
+                WorkspaceBindMount(source = uploadDir, target = "/upload", access = MountAccess.READ_ONLY),
             ),
         )
         return manager to skillsDir
     }
 
     @Test
-    fun layoutWritableRootsIncludeOnlyWritableBindMounts() {
+    fun layoutEnforcesWritableAndReadOnlyRootsWithNormalization() {
         val (manager, _) = createManager()
         val layout = manager.layout
 
         assertEquals("/workspace", layout.workspaceDir)
         assertEquals(listOf("/workspace", "/tmp", "/skills"), layout.writableRoots)
+        assertEquals(listOf("/upload"), layout.readOnlyRoots)
+
         assertTrue(layout.isWritable("/workspace"))
         assertTrue(layout.isWritable("/skills/demo/SKILL.md"))
         assertFalse(layout.isWritable("/upload/a.txt"))
+        assertTrue(layout.isReadOnly("/upload/a.txt"))
+        // 词法穿越（`..`）必须先归一化再判定，绝不能借可写前缀绕过只读检查
+        assertFalse(layout.isWritable("/skills/../upload/a.txt"))
+        assertTrue(layout.isReadOnly("/skills/../upload/a.txt"))
         assertFalse(layout.isWritable("/workspace-other/a.txt"))
         assertFalse(layout.isWritable("/"))
+    }
+
+    @Test
+    fun writeAbsoluteTextRejectsReadOnlyMountsImmediately() {
+        val (manager, _) = createManager()
+        val backend = manager.backend(root)
+
+        val err = assertThrows(IllegalArgumentException::class.java) {
+            backend.writeAbsoluteText("/upload/evil.txt", "blocked", overwrite = true)
+        }
+        assertTrue(err.message!!.contains("read-only"))
+
+        val traversalErr = assertThrows(IllegalArgumentException::class.java) {
+            backend.writeAbsoluteText("/skills/../upload/evil.txt", "blocked", overwrite = true)
+        }
+        assertTrue(traversalErr.message!!.contains("read-only"))
     }
 
     @Test
@@ -110,62 +133,67 @@ class LocalWorkspaceBackendTest {
     }
 
     @Test
-    fun disablingHostBridgeFiltersOutHostBridgeAndSdcardMounts() {
+    fun sessionHostAccessMountsSdcardStrictlyReadOnlyAndDefaultsToIsolated() {
         val nativeLibraryDir = tempFolder.newFolder("native")
         val skillsDir = tempFolder.newFolder("skills")
         val bridgeDir = tempFolder.newFolder("host_bridge")
         val sdcardDir = tempFolder.newFolder("sdcard")
-        val rikkaDownloadDir = File(sdcardDir, "Download/RikkaHub").apply { mkdirs() }
         File(sdcardDir, "secret.md").writeText("sdcard-content")
 
         val manager = WorkspaceManager(
             baseDir = tempFolder.newFolder("workspaces"),
             shellRunner = ProotShellRunner(nativeLibraryDir),
             bindMounts = listOf(
-                WorkspaceBindMount(source = skillsDir, target = "/skills", writable = true),
-                WorkspaceBindMount(source = bridgeDir, target = "/run/host_bridge", requiresHostBridge = true),
-                WorkspaceBindMount(source = sdcardDir, target = "/sdcard", requiresHostBridge = true),
-                WorkspaceBindMount(source = sdcardDir, target = "/storage/emulated/0", requiresHostBridge = true),
+                WorkspaceBindMount(source = skillsDir, target = "/skills", access = MountAccess.WRITABLE_AUTO),
                 WorkspaceBindMount(
-                    source = rikkaDownloadDir,
-                    target = "/sdcard/Download/RikkaHub",
-                    writable = true,
-                    requiresHostBridge = true,
+                    source = bridgeDir,
+                    target = "/run/host_bridge",
+                    access = MountAccess.READ_ONLY,
+                    sessionHostMount = true,
                 ),
                 WorkspaceBindMount(
-                    source = rikkaDownloadDir,
-                    target = "/storage/emulated/0/Download/RikkaHub",
-                    writable = true,
-                    requiresHostBridge = true,
+                    source = sdcardDir,
+                    target = "/sdcard",
+                    access = MountAccess.READ_ONLY,
+                    sessionHostMount = true,
+                ),
+                WorkspaceBindMount(
+                    source = sdcardDir,
+                    target = "/storage/emulated/0",
+                    access = MountAccess.READ_ONLY,
+                    sessionHostMount = true,
                 ),
             ),
         ).also { it.ensureWorkspace(root) }
 
-        // 开启桥接时：支持 /sdcard 和 /storage/emulated/0 双路径别名解析，且包含可写免审目录与挂载参数
-        val enabledBackend = manager.backend(root, hostBridgeEnabled = true)
-        assertTrue(enabledBackend.layout.isWritable("/sdcard/Download/RikkaHub/out.apk"))
-        assertTrue(enabledBackend.layout.isWritable("/storage/emulated/0/Download/RikkaHub/out.apk"))
-        assertEquals(14L, enabledBackend.absoluteFileSize("/sdcard/secret.md"))
-        assertEquals(14L, enabledBackend.absoluteFileSize("/storage/emulated/0/secret.md"))
-        val enabledLaunch = manager.terminalLaunch(root, shellCompatibilityMode = false, hostBridgeEnabled = true)!!
-        assertTrue(enabledLaunch.args.any { it.endsWith(":/sdcard") })
-        assertTrue(enabledLaunch.args.any { it.endsWith(":/storage/emulated/0") })
-        assertTrue(enabledLaunch.args.any { it.endsWith(":/run/host_bridge") })
-
-        // 关闭桥接时：退回纯隔离沙盒，不再挂载 /sdcard、/storage/emulated/0 与 /run/host_bridge
-        val disabledBackend = manager.backend(root, hostBridgeEnabled = false)
-        assertFalse(disabledBackend.layout.isWritable("/sdcard/Download/RikkaHub/out.apk"))
-        assertFalse(disabledBackend.layout.isWritable("/storage/emulated/0/Download/RikkaHub/out.apk"))
-        assertEquals(listOf("/workspace", "/tmp", "/skills"), disabledBackend.layout.writableRoots)
-        // 未挂载 /sdcard 时回退到 Rootfs 内部目录（文件不存在）
+        // 默认状态（hostAccess = false）：完全隔离，不挂载 /sdcard、/storage/emulated/0 或 /run/host_bridge
+        val isolatedBackend = manager.backend(root)
+        assertFalse(isolatedBackend.layout.isReadOnly("/sdcard/secret.md"))
+        assertEquals(listOf("/workspace", "/tmp", "/skills"), isolatedBackend.layout.writableRoots)
         assertEquals(
             File(manager.linuxDir(root), "sdcard/secret.md").canonicalFile,
-            disabledBackend.localAbsoluteFile("/sdcard/secret.md"),
+            isolatedBackend.localAbsoluteFile("/sdcard/secret.md"),
         )
-        val disabledLaunch = manager.terminalLaunch(root, shellCompatibilityMode = false, hostBridgeEnabled = false)!!
-        assertFalse(disabledLaunch.args.any { it.endsWith(":/sdcard") })
-        assertFalse(disabledLaunch.args.any { it.endsWith(":/storage/emulated/0") })
-        assertFalse(disabledLaunch.args.any { it.endsWith(":/run/host_bridge") })
-        assertTrue(disabledLaunch.args.any { it.endsWith(":/skills") })
+        val isolatedLaunch = manager.terminalLaunch(root, shellCompatibilityMode = false)!!
+        assertFalse(isolatedLaunch.args.any { it.endsWith(":/sdcard") })
+        assertFalse(isolatedLaunch.args.any { it.endsWith(":/storage/emulated/0") })
+        assertFalse(isolatedLaunch.args.any { it.endsWith(":/run/host_bridge") })
+        assertTrue(isolatedLaunch.args.any { it.endsWith(":/skills") })
+
+        // 会话显式开启本机只读挂载（hostAccess = true）：可读 /sdcard 与 /storage/emulated/0，但全盘严格只读
+        val roBackend = manager.backend(root, hostAccess = true)
+        assertEquals(14L, roBackend.absoluteFileSize("/sdcard/secret.md"))
+        assertEquals(14L, roBackend.absoluteFileSize("/storage/emulated/0/secret.md"))
+        assertTrue(roBackend.layout.isReadOnly("/sdcard/secret.md"))
+        assertTrue(roBackend.layout.isReadOnly("/sdcard/Download/RikkaHub/out.apk"))
+        assertTrue(roBackend.layout.isReadOnly("/storage/emulated/0/Download/RikkaHub/out.apk"))
+        assertFalse(roBackend.layout.isWritable("/sdcard/Download/RikkaHub/out.apk"))
+        assertThrows(IllegalArgumentException::class.java) {
+            roBackend.writeAbsoluteText("/sdcard/Download/RikkaHub/out.txt", "nope", overwrite = true)
+        }
+        val roLaunch = manager.terminalLaunch(root, shellCompatibilityMode = false, hostAccess = true)!!
+        assertTrue(roLaunch.args.any { it.endsWith(":/sdcard") })
+        assertTrue(roLaunch.args.any { it.endsWith(":/storage/emulated/0") })
+        assertTrue(roLaunch.args.any { it.endsWith(":/run/host_bridge") })
     }
 }

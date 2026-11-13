@@ -45,7 +45,7 @@ enum class PhoneKey { BACK, HOME, RECENTS, NOTIFICATIONS, ENTER }
 
 /**
  * 操作手机的底层能力，坐标都是屏幕像素。
- * 优先使用 Root / Shell 控制器（无需开启系统无障碍服务，免风控检测），未取得特权时回退无障碍服务。
+ * 优先使用 Sui / Shizuku / Root 控制器（无需开启系统无障碍服务，免风控检测），未取得特权时回退无障碍服务。
  */
 interface PhoneController {
     /**
@@ -71,15 +71,6 @@ interface PhoneController {
     fun listApps(): List<PhoneApp>
 
     suspend fun openApp(packageName: String): Boolean
-
-    /** 免截图获取顶层 Activity / Intent / Fragment 详情（Root/Shell 后端支持） */
-    suspend fun dumpTopActivity(): String? = null
-
-    /** 免下拉读取当前状态栏活动通知（Root/Shell 后端支持） */
-    suspend fun readNotifications(): String? = null
-
-    /** 通过 DeepLink / Intent URI 直接跳转页面，解析后的目标包名为空或被拒时返回 false */
-    suspend fun openUri(uri: String, blockedPackages: Set<String>, ownPackageName: String): Boolean = false
 }
 
 /**
@@ -91,7 +82,7 @@ fun isFloatingChatWindowOn(context: Context, settings: Settings): Boolean =
 
 /**
  * 管理当前活跃的 [PhoneController]。
- * 当设备具备 Root / Sui 权限时，[rootController] 始终优先于无障碍服务，避免用户开启系统无障碍。
+ * 当设备具备 Sui / Shizuku / Root 权限时，[rootController] 始终优先于无障碍服务，避免用户开启系统无障碍。
  */
 class PhoneUseManager {
     companion object {

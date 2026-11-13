@@ -150,16 +150,20 @@ class PhoneUseToolTest {
     }
 
     @Test
-    fun `blocked apps cannot be listed or opened`() = runTest {
+    fun `blocked apps including password managers cannot be listed or opened`() = runTest {
         manager.attach(controller)
-        assertFalse(call { put("action", "list_apps") }.contains("Alipay"))
-        val error = runCatching {
-            call {
-                put("action", "open_app")
-                put("app", "Alipay")
-            }
-        }.exceptionOrNull()
-        assertTrue(error!!.message!!.contains("blocked"))
+        val listed = call { put("action", "list_apps") }
+        assertFalse(listed.contains("Alipay"))
+        assertFalse(listed.contains("Bitwarden"))
+        for (blockedName in listOf("Alipay", "Bitwarden")) {
+            val error = runCatching {
+                call {
+                    put("action", "open_app")
+                    put("app", blockedName)
+                }
+            }.exceptionOrNull()
+            assertTrue(error!!.message!!.contains("blocked"))
+        }
         assertTrue(controller.opened.isEmpty())
     }
 
@@ -290,6 +294,7 @@ class PhoneUseToolTest {
         override fun listApps() = listOf(
             PhoneApp("com.demo", "Demo App"),
             PhoneApp("com.eg.android.AlipayGphone", "Alipay"),
+            PhoneApp("com.x8bit.bitwarden", "Bitwarden"),
         )
 
         override suspend fun openApp(packageName: String): Boolean {

@@ -3,13 +3,27 @@ package me.rerere.workspace
 import java.io.File
 import java.util.UUID
 
+/**
+ * 本地 PRoot 绑定挂载点的读写访问策略。
+ */
+enum class MountAccess {
+    /** 容器内可见但严格禁止任何修改（AI 文件工具硬拒绝 + PRoot LD_PRELOAD 层返回 EROFS） */
+    READ_ONLY,
+
+    /** 容器内可读写，AI 文件工具写入时需经用户弹窗审批 */
+    WRITABLE_ASK,
+
+    /** 容器内可读写，AI 文件工具可直接免审批写入（如 `/skills`） */
+    WRITABLE_AUTO,
+}
+
 data class WorkspaceBindMount(
     val source: File,
     val target: String,
-    /** AI 写入该目录时免强制审批 */
-    val writable: Boolean = false,
-    /** 是否属于宿主机桥接与共享存储挂载（如 `/run/host_bridge`、`/sdcard`、`/storage/emulated/0`），受工作区桥接开关控制 */
-    val requiresHostBridge: Boolean = false,
+    /** 该挂载点在容器与工具层的读写策略，默认严格只读 */
+    val access: MountAccess = MountAccess.READ_ONLY,
+    /** 是否属于会话级宿主机只读透视挂载（如 `/sdcard`、`/storage/emulated/0`、`/run/host_bridge`），仅在当前会话显式开启时暴露 */
+    val sessionHostMount: Boolean = false,
 ) {
     init {
         require(target.startsWith("/")) { "Bind mount target must be absolute: $target" }
@@ -134,11 +148,11 @@ class ProotShellRunner(
     }
 
     /**
-     * 若当前 Rootfs 为 glibc (Ubuntu/Debian) 且宿主机桥接目录中存在匹配的 libsafesdcard.so，
-     * 注入 LD_PRELOAD 以在系统调用层拦截 Python/Node/C 对 /sdcard 文件的直接 unlink 删除。
+     * 若当前会话挂载了宿主机存储且 Rootfs 为 glibc (Ubuntu/Debian)，
+     * 注入 `libsdcard_ro.so` 在系统调用层强制将 `/sdcard` 与 `/storage/emulated/0` 锁定为只读 (`EROFS`)。
      */
     private fun buildRootfsEnv(linuxDir: File, bindMounts: List<WorkspaceBindMount>): List<String> {
-        val preload = resolveSafeSdcardPreload(linuxDir, bindMounts)
+        val preload = resolveSdcardReadOnlyPreload(linuxDir, bindMounts)
         return if (preload != null) {
             ROOTFS_ENV + "LD_PRELOAD=$preload"
         } else {
@@ -146,19 +160,19 @@ class ProotShellRunner(
         }
     }
 
-    private fun resolveSafeSdcardPreload(linuxDir: File, bindMounts: List<WorkspaceBindMount>): String? {
+    private fun resolveSdcardReadOnlyPreload(linuxDir: File, bindMounts: List<WorkspaceBindMount>): String? {
         val bridgeMount = bindMounts.firstOrNull { it.target.trimEnd('/') == "/run/host_bridge" } ?: return null
         return when {
             (File(linuxDir, "lib/aarch64-linux-gnu/libc.so.6").exists() ||
                 File(linuxDir, "usr/lib/aarch64-linux-gnu/libc.so.6").exists()) &&
-                File(bridgeMount.source, "libsafesdcard_arm64.so").isFile -> {
-                "/run/host_bridge/libsafesdcard_arm64.so"
+                File(bridgeMount.source, "libsdcard_ro_arm64.so").isFile -> {
+                "/run/host_bridge/libsdcard_ro_arm64.so"
             }
 
             (File(linuxDir, "lib/x86_64-linux-gnu/libc.so.6").exists() ||
                 File(linuxDir, "usr/lib/x86_64-linux-gnu/libc.so.6").exists()) &&
-                File(bridgeMount.source, "libsafesdcard_x86_64.so").isFile -> {
-                "/run/host_bridge/libsafesdcard_x86_64.so"
+                File(bridgeMount.source, "libsdcard_ro_x86_64.so").isFile -> {
+                "/run/host_bridge/libsdcard_ro_x86_64.so"
             }
 
             else -> null

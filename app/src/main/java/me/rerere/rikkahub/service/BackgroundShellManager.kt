@@ -141,13 +141,14 @@ class BackgroundShellManager(
         workspaceId: String,
         command: String,
         cwd: String,
+        hostAccess: Boolean = false,
     ): BackgroundShellTask {
         val running = tasksOf(conversationId).count { it.status == BackgroundShellStatus.RUNNING }
         require(running < MAX_RUNNING_PER_CONVERSATION) {
             "$running background commands are already running. Wait for one to finish or stop one with workspace_shell_kill."
         }
         val id = newId()
-        val backgroundCommand = workspaceRepository.startBackgroundCommand(workspaceId, command, cwd, id)
+        val backgroundCommand = workspaceRepository.startBackgroundCommand(workspaceId, command, cwd, id, hostAccess)
         val task = BackgroundShellTask(
             id = id,
             conversationId = conversationId,

@@ -73,6 +73,7 @@ class ChatTurnContext(
     val conversationId: Uuid,
     val conversationSystemPrompt: String?,
     val workspaceCwd: String?,
+    val workspaceHostAccess: Boolean,
     val memories: List<MemoryFile>,
     val tools: List<Tool>,
 )
@@ -123,6 +124,7 @@ class ChatRequestFactory(
             conversationId = conversation.id,
             conversationSystemPrompt = conversation.customSystemPrompt,
             workspaceCwd = conversation.workspaceCwd,
+            workspaceHostAccess = conversation.workspaceHostAccess,
             memories = if (assistant.enableMemory) memoryRepository.getFiles(assistant.memoryId) else emptyList(),
             tools = chatToolFactory.createTools(
                 settings = settings,
@@ -130,6 +132,7 @@ class ChatRequestFactory(
                 model = model,
                 conversationId = conversation.id,
                 workspaceCwd = conversation.workspaceCwd,
+                workspaceHostAccess = conversation.workspaceHostAccess,
             ),
         )
     }
@@ -273,6 +276,7 @@ class ChatRequestFactory(
             settings = turn.settings,
             processingStatus = processingStatus,
             workspaceCwd = turn.workspaceCwd,
+            workspaceHostAccess = turn.workspaceHostAccess,
         ).expandNotices()
         val params = TextGenerationParams(
             model = turn.model,

@@ -277,20 +277,6 @@ class WorkspaceDetailVM(
         viewModelScope.launch {
             try {
                 repository.setShellCompatibilityMode(id, enabled)
-                val workspace = repository.getById(id)
-                _state.update { it.copy(workspace = workspace) }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                _settingsError.value = error.message.orEmpty()
-            }
-        }
-    }
-
-    fun setHostBridgeEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            try {
-                repository.setHostBridgeEnabled(id, enabled)
                 loadWorkspace()
             } catch (error: CancellationException) {
                 throw error
@@ -299,6 +285,7 @@ class WorkspaceDetailVM(
             }
         }
     }
+}
 
     fun setToolApproval(toolName: String, needsApproval: Boolean) {
         viewModelScope.launch {

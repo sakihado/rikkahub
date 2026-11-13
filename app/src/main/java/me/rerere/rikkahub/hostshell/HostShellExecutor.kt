@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.phoneuse
+package me.rerere.rikkahub.hostshell
 
 import android.content.Context
 import android.os.ParcelFileDescriptor
@@ -37,7 +37,7 @@ data class HostShellResult(
 }
 
 /**
- * 统一宿主机命令进程执行与取消器（职责收敛：专职命令派发、身份隔离契约与整棵子进程树生命周期清理）。
+ * 统一宿主机命令进程执行与取消器（专职命令派发、身份隔离契约与整棵子进程树生命周期清理）。
  *
  * 安全与可靠性保证：
  * 1. **严格身份契约（Fail-Closed）**：
@@ -47,6 +47,9 @@ data class HostShellResult(
  *    优先通过内置 `libshelldrop.so --lifeline-stdin` 为每次命令创建独立进程组 (`setpgid`)，
  *    当客户端超时或点击「停止生成」断开 lifeline 管道时，守护父进程在毫秒级向 `-child_pgid` 发送 `SIGKILL`，
  *    彻底杜绝后台孙进程逃逸。即使在无 `libshelldrop` 的兜底路径下，也先采集并清理后代进程树再销毁外层进程。
+ * 3. **隔离且可恢复的 Supervisor 探测**：
+ *    Shizuku (UID 2000) 与 Root (UID 0) 使用各自独立命名的缓存文件且设置 `0700` 权限，彻底消除 `/data/local/tmp`
+ *    下的跨 UID 覆盖失败或低权限篡改风险；探测失败仅做短暂冷却而不永久锁死。
  */
 class HostShellExecutor(
     private val context: Context? = null,
@@ -64,13 +67,16 @@ class HostShellExecutor(
     private var verifiedShizukuSupervisorPath: String? = null
 
     @Volatile
-    private var shizukuSupervisorProbed: Boolean = false
+    private var verifiedShizukuForRootBackend: Boolean? = null
+
+    @Volatile
+    private var lastShizukuProbeFailureMs: Long = 0L
 
     @Volatile
     private var verifiedSuSupervisorPath: String? = null
 
     @Volatile
-    private var suSupervisorProbed: Boolean = false
+    private var lastSuProbeFailureMs: Long = 0L
 
     private val nativeShellDropBinary: File?
         get() = context?.applicationInfo?.nativeLibraryDir
@@ -80,14 +86,19 @@ class HostShellExecutor(
     suspend fun ensurePrivilegedAccess(interactive: Boolean = true): Boolean =
         privilegeManager.ensurePrivilegedAccess(interactive)
 
+    /**
+     * 执行宿主机命令。
+     * @param interactiveAuth 未授权时是否允许主动弹出系统 Sui/Shizuku/su 授权框（`android_shell` 为 true，后台 `host-sh` 探针为 false）。
+     */
     suspend fun execute(
         command: String,
         asRoot: Boolean = false,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         maxStdoutBytes: Int = MAX_CAPTURE_BYTES,
+        interactiveAuth: Boolean = true,
     ): HostShellResult = withContext(Dispatchers.IO) {
         if (!backendState.value.isPrivileged) {
-            privilegeManager.ensurePrivilegedAccess(interactive = true)
+            privilegeManager.ensurePrivilegedAccess(interactive = interactiveAuth)
         }
 
         val wrappedScript = buildAndroidEnvScript(command)
@@ -109,7 +120,7 @@ class HostShellExecutor(
         timeoutMs: Long,
         maxStdoutBytes: Int,
     ): HostShellResult {
-        val supervisor = getVerifiedSupervisorViaShizuku()
+        val supervisor = getVerifiedSupervisorViaShizuku(isRootServer = true)
         if (asRoot) {
             val args = if (supervisor != null) {
                 arrayOf(supervisor, "--keep-uid", "--lifeline-stdin", "-c", wrappedScript)
@@ -157,7 +168,7 @@ class HostShellExecutor(
             }
         }
 
-        val supervisor = getVerifiedSupervisorViaShizuku()
+        val supervisor = getVerifiedSupervisorViaShizuku(isRootServer = false)
         val args = if (supervisor != null) {
             arrayOf(supervisor, "--keep-uid", "--lifeline-stdin", "-c", wrappedScript)
         } else {
@@ -273,14 +284,17 @@ class HostShellExecutor(
         ).copy(effectiveIdentity = "app-sandbox")
     }
 
-    private suspend fun getVerifiedSupervisorViaShizuku(): String? = shellDropProbeMutex.withLock {
-        if (shizukuSupervisorProbed) return@withLock verifiedShizukuSupervisorPath
-        val bin = nativeShellDropBinary ?: run {
-            shizukuSupervisorProbed = true
+    private suspend fun getVerifiedSupervisorViaShizuku(isRootServer: Boolean): String? = shellDropProbeMutex.withLock {
+        if (verifiedShizukuSupervisorPath != null && verifiedShizukuForRootBackend == isRootServer) {
+            return@withLock verifiedShizukuSupervisorPath
+        }
+        val bin = nativeShellDropBinary ?: return@withLock null
+        val now = System.currentTimeMillis()
+        if (now - lastShizukuProbeFailureMs < PROBE_RETRY_COOLDOWN_MS) {
             return@withLock null
         }
 
-        val expectFlag = if (backendState.value == HostBackendType.SUI_ROOT) "--uid-shell" else "--keep-uid"
+        val expectFlag = if (isRootServer) "--uid-shell" else "--keep-uid"
         val directProbe = executeViaShizuku(
             cmdArgs = arrayOf(bin.absolutePath, expectFlag, "-c", "id -u"),
             keepStdinAsLifeline = false,
@@ -289,16 +303,20 @@ class HostShellExecutor(
         )
         if (!directProbe.timedOut && directProbe.exitCode == 0 && directProbe.stdout.trim() == "2000") {
             verifiedShizukuSupervisorPath = bin.absolutePath
-            shizukuSupervisorProbed = true
+            verifiedShizukuForRootBackend = isRootServer
             return@withLock verifiedShizukuSupervisorPath
         }
 
-        val stagedPath = "/data/local/tmp/.rikkahub_shelldrop_${context?.packageName.orEmpty().hashCode().toUInt()}"
+        // 按服务端 UID (uid0 vs uid2000) 彻底隔离暂存文件名并强制 0700，杜绝粘滞位目录覆盖冲突与低权限篡改提权
+        val uidTag = if (isRootServer) "uid0" else "uid2000"
+        val pkgHash = context?.packageName.orEmpty().hashCode().toUInt()
+        val stagedPath = "/data/local/tmp/.rikkahub_shelldrop_${uidTag}_$pkgHash"
+        val chmodMode = if (isRootServer) "700" else "755"
         val stageProbe = executeViaShizuku(
             cmdArgs = arrayOf(
                 "/system/bin/sh",
                 "-c",
-                "cp -f ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod 755 $stagedPath && $stagedPath $expectFlag -c 'id -u'",
+                "rm -f $stagedPath 2>/dev/null; cp -f ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod $chmodMode $stagedPath && $stagedPath $expectFlag -c 'id -u'",
             ),
             keepStdinAsLifeline = false,
             timeoutMs = 4_000L,
@@ -306,19 +324,20 @@ class HostShellExecutor(
         )
         if (!stageProbe.timedOut && stageProbe.exitCode == 0 && stageProbe.stdout.trim() == "2000") {
             verifiedShizukuSupervisorPath = stagedPath
-            shizukuSupervisorProbed = true
+            verifiedShizukuForRootBackend = isRootServer
             return@withLock verifiedShizukuSupervisorPath
         }
 
         Log.w(TAG, "Shizuku supervisor probe failed (exit=${stageProbe.exitCode}, err=${stageProbe.stderr})")
-        shizukuSupervisorProbed = true
+        lastShizukuProbeFailureMs = System.currentTimeMillis()
         return@withLock null
     }
 
     private suspend fun getVerifiedSupervisorViaSu(su: String): String? = shellDropProbeMutex.withLock {
-        if (suSupervisorProbed) return@withLock verifiedSuSupervisorPath
-        val bin = nativeShellDropBinary ?: run {
-            suSupervisorProbed = true
+        verifiedSuSupervisorPath?.let { return@withLock it }
+        val bin = nativeShellDropBinary ?: return@withLock null
+        val now = System.currentTimeMillis()
+        if (now - lastSuProbeFailureMs < PROBE_RETRY_COOLDOWN_MS) {
             return@withLock null
         }
 
@@ -331,16 +350,16 @@ class HostShellExecutor(
         )
         if (!directProbe.timedOut && directProbe.exitCode == 0 && directProbe.stdout.trim() == "2000") {
             verifiedSuSupervisorPath = bin.absolutePath
-            suSupervisorProbed = true
             return@withLock verifiedSuSupervisorPath
         }
 
-        val stagedPath = "/data/local/tmp/.rikkahub_shelldrop_${context?.packageName.orEmpty().hashCode().toUInt()}"
+        val pkgHash = context?.packageName.orEmpty().hashCode().toUInt()
+        val stagedPath = "/data/local/tmp/.rikkahub_shelldrop_uid0_$pkgHash"
         val stageProbe = runLocalProcess(
             commandArgs = listOf(
                 su,
                 "-c",
-                "cp -f ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod 755 $stagedPath && $stagedPath --uid-shell -c 'id -u'",
+                "rm -f $stagedPath 2>/dev/null; cp -f ${shellSingleQuote(bin.absolutePath)} $stagedPath && chmod 700 $stagedPath && $stagedPath --uid-shell -c 'id -u'",
             ),
             keepStdinAsLifeline = false,
             timeoutMs = 4_000L,
@@ -349,11 +368,10 @@ class HostShellExecutor(
         )
         if (!stageProbe.timedOut && stageProbe.exitCode == 0 && stageProbe.stdout.trim() == "2000") {
             verifiedSuSupervisorPath = stagedPath
-            suSupervisorProbed = true
             return@withLock verifiedSuSupervisorPath
         }
 
-        suSupervisorProbed = true
+        lastSuProbeFailureMs = System.currentTimeMillis()
         return@withLock null
     }
 
@@ -635,10 +653,11 @@ class HostShellExecutor(
         const val MAX_TIMEOUT_MS = 120_000L
         const val MAX_CAPTURE_BYTES = 16 * 1024 * 1024
         private const val MAX_STDERR_BYTES = 256 * 1024
+        private const val PROBE_RETRY_COOLDOWN_MS = 5_000L
     }
 }
 
-private fun shellSingleQuote(s: String): String = "'" + s.replace("'", "'\"'\"'") + "'"
+internal fun shellSingleQuote(s: String): String = "'" + s.replace("'", "'\"'\"'") + "'"
 
 private class ByteStreamCollector(
     private val stream: InputStream,

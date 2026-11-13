@@ -38,8 +38,8 @@ import me.rerere.rikkahub.di.appModule
 import me.rerere.rikkahub.di.dataSourceModule
 import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
-import me.rerere.rikkahub.phoneuse.HostPrivilegeManager
-import me.rerere.rikkahub.phoneuse.HostShellExecutor
+import me.rerere.rikkahub.hostshell.HostPrivilegeManager
+import me.rerere.rikkahub.hostshell.HostShellExecutor
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.RootPhoneController
 import me.rerere.rikkahub.service.HostBridgeDaemon
@@ -218,14 +218,29 @@ class RikkaHubApp : Application() {
         get<AppScope>().launch(Dispatchers.IO) {
             runCatching {
                 val bridgeDir = File(filesDir, "host_bridge").apply { mkdirs() }
-                // 提取预编译的 PRoot /sdcard 防误删保护库（由 CI 编译打包在 assets/safesdcard 下）
-                listOf("libsafesdcard_arm64.so", "libsafesdcard_x86_64.so").forEach { name ->
+                // 清理旧版本遗留的 /sdcard 防误删回收站动态库，现已由纯只读 libsdcard_ro 取代
+                listOf("libsafesdcard_arm64.so", "libsafesdcard_x86_64.so").forEach { oldName ->
+                    runCatching { File(bridgeDir, oldName).delete() }
+                }
+                // 提取预编译的 PRoot /sdcard 纯只读保护库（写临时文件再原子重命名，杜绝运行中 O_TRUNC 触发 SIGBUS）
+                listOf("libsdcard_ro_arm64.so", "libsdcard_ro_x86_64.so").forEach { name ->
                     runCatching {
-                        assets.open("safesdcard/$name").use { input ->
-                            val outFile = File(bridgeDir, name)
-                            outFile.outputStream().use { out -> input.copyTo(out) }
-                            outFile.setReadable(true, false)
-                            outFile.setExecutable(true, false)
+                        val assetBytes = assets.open("sdcard_ro/$name").use { it.readBytes() }
+                        val outFile = File(bridgeDir, name)
+                        val sameContent = outFile.isFile &&
+                            outFile.length() == assetBytes.size.toLong() &&
+                            outFile.readBytes().contentEquals(assetBytes)
+                        if (!sameContent) {
+                            val tmpFile = File(bridgeDir, "$name.tmp.${System.nanoTime()}")
+                            tmpFile.writeBytes(assetBytes)
+                            tmpFile.setReadable(true, false)
+                            tmpFile.setExecutable(true, false)
+                            if (!tmpFile.renameTo(outFile)) {
+                                tmpFile.copyTo(outFile, overwrite = true)
+                                tmpFile.delete()
+                                outFile.setReadable(true, false)
+                                outFile.setExecutable(true, false)
+                            }
                         }
                     }
                 }

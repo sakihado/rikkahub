@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.phoneuse
+package me.rerere.rikkahub.hostshell
 
 import android.content.Context
 import android.content.pm.PackageManager
@@ -15,6 +15,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.rerere.rikkahub.BuildConfig
+import me.rerere.rikkahub.phoneuse.PhoneController
+import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import rikka.shizuku.Shizuku
 import rikka.sui.Sui
 import java.io.File
@@ -223,8 +225,7 @@ class HostPrivilegeManager(
                     "appops set $packageName MANAGE_EXTERNAL_STORAGE allow 2>/dev/null; " +
                     "pm grant $packageName android.permission.READ_EXTERNAL_STORAGE 2>/dev/null; " +
                     "pm grant $packageName android.permission.WRITE_EXTERNAL_STORAGE 2>/dev/null; " +
-                    "mkdir -p /storage/emulated/0/.Trash-RikkaHub /storage/emulated/0/Download/RikkaHub 2>/dev/null; " +
-                    "chmod 0777 /storage/emulated/0/.Trash-RikkaHub 2>/dev/null; " +
+                    "mkdir -p /storage/emulated/0/Download/RikkaHub 2>/dev/null; " +
                     "cmd appops get $packageName MANAGE_EXTERNAL_STORAGE 2>/dev/null",
                 asRoot = false,
                 timeoutMs = 5_000L,

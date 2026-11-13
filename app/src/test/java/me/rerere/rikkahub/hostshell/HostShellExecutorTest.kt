@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.phoneuse
+package me.rerere.rikkahub.hostshell
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay

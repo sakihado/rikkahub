@@ -13,6 +13,7 @@ import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.TranslationHistoryRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.data.skills.SkillManager
+import me.rerere.workspace.MountAccess
 import me.rerere.workspace.ProotShellRunner
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceBindMount
@@ -62,59 +63,45 @@ val repositoryModule = module {
             shellRunner = ProotShellRunner(
                 nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
             ),
-            // 同一份挂载表同时用于 PRoot 的 -b 参数 (命令执行与终端)、文件工具的路径解析和写入审批, 避免多处漂移
+            // 同一份挂载表同时用于 PRoot 的 -b 参数、文件工具的路径解析和只读/写入权限校验
             bindMounts = listOf(
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.SKILLS).apply { mkdirs() },
                     target = "/skills",
-                    writable = true,
+                    access = MountAccess.WRITABLE_AUTO,
                 ),
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.BUILTIN_SKILLS).apply { mkdirs() },
                     target = "/builtin_skills",
+                    access = MountAccess.READ_ONLY,
                 ),
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.TOOL_OUTPUTS).apply { mkdirs() },
                     target = "/tool_outputs",
+                    access = MountAccess.READ_ONLY,
                 ),
                 WorkspaceBindMount(
                     source = File(context.filesDir, FileFolders.UPLOAD).apply { mkdirs() },
                     target = "/upload",
+                    access = MountAccess.READ_ONLY,
                 ),
                 WorkspaceBindMount(
                     source = File(context.filesDir, "host_bridge").apply { mkdirs() },
                     target = "/run/host_bridge",
-                    requiresHostBridge = true,
+                    access = MountAccess.READ_ONLY,
+                    sessionHostMount = true,
                 ),
                 WorkspaceBindMount(
                     source = android.os.Environment.getExternalStorageDirectory(),
                     target = "/sdcard",
-                    writable = false,
-                    requiresHostBridge = true,
+                    access = MountAccess.READ_ONLY,
+                    sessionHostMount = true,
                 ),
                 WorkspaceBindMount(
                     source = android.os.Environment.getExternalStorageDirectory(),
                     target = "/storage/emulated/0",
-                    writable = false,
-                    requiresHostBridge = true,
-                ),
-                WorkspaceBindMount(
-                    source = File(
-                        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-                        "RikkaHub"
-                    ),
-                    target = "/sdcard/Download/RikkaHub",
-                    writable = true,
-                    requiresHostBridge = true,
-                ),
-                WorkspaceBindMount(
-                    source = File(
-                        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-                        "RikkaHub"
-                    ),
-                    target = "/storage/emulated/0/Download/RikkaHub",
-                    writable = true,
-                    requiresHostBridge = true,
+                    access = MountAccess.READ_ONLY,
+                    sessionHostMount = true,
                 ),
             ),
         )

@@ -8,7 +8,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Point
 import android.graphics.Rect
-import android.net.Uri
 import android.os.Build
 import android.util.Xml
 import android.view.WindowManager
@@ -16,6 +15,8 @@ import androidx.core.graphics.scale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.hostshell.HostShellExecutor
+import me.rerere.rikkahub.hostshell.shellSingleQuote
 import org.xmlpull.v1.XmlPullParser
 import java.io.ByteArrayOutputStream
 import java.io.StringReader
@@ -28,13 +29,13 @@ private const val MAX_LABEL_PARTS = 3
 private const val JPEG_QUALITY = 80
 
 /**
- * 基于 Root / Shell (UID 2000) 的 [PhoneController] 实现。
+ * 基于 Sui / Shizuku / Root (UID 2000) 的免无障碍 [PhoneController] 实现。
  *
- * 完全无需开启系统无障碍服务（彻底规避应用风控与无障碍卡顿/掉线）：
+ * 完全无需开启系统无障碍服务（彻底规避金融/游戏风控与无障碍掉帧）：
  * - 屏幕结构读取：`uiautomator dump /proc/self/fd/1` 内存直出 XML 解析
  * - 屏幕截图：`screencap -p` 二进制流缩放压缩
- * - 点击与手势：`input tap` / `input swipe` + 悬浮窗轨迹绘制 [GestureIndicator]
- * - 中西文输入：主线程写入系统剪贴板 + `input keyevent 279` (KEYCODE_PASTE)
+ * - 点击与手势：优先走 Sui/Shizuku Binder 直连 `IInputManager`，回退 `input tap` / `input swipe` + [GestureIndicator]
+ * - 中西文输入：主线程暂存并写入剪贴板 + `KEYCODE_PASTE` (279)，粘贴后自动还原原剪贴板内容
  * - 后台启动应用：`am start` 直接绕过 Android 10+ 后台拉起限制
  */
 class RootPhoneController(
@@ -211,17 +212,30 @@ class RootPhoneController(
 
         if (text.isEmpty()) return@withContext true
 
-        // 在主线程把目标文本写入剪贴板，再用 KEYCODE_PASTE (279) 粘贴，100% 兼容中文、符号与换行
+        // 在主线程暂存旧剪贴板、写入待输入文本并用 KEYCODE_PASTE (279) 粘贴，完成后恢复用户剪贴板
+        var previousClip: ClipData? = null
         withContext(Dispatchers.Main) {
             val cm = context.getSystemService(ClipboardManager::class.java)
+            previousClip = runCatching { cm?.primaryClip }.getOrNull()
             cm?.setPrimaryClip(ClipData.newPlainText("rikkahub_input", text))
         }
-        delay(60L)
-        if (fastInput && ShizukuFastInput.injectKeyCode(android.view.KeyEvent.KEYCODE_PASTE)) {
-            return@withContext true
+        try {
+            delay(60L)
+            val pasted = (fastInput && ShizukuFastInput.injectKeyCode(android.view.KeyEvent.KEYCODE_PASTE)) ||
+                executor.execute("input keyevent 279", asRoot = false, timeoutMs = 4_000L).exitCode == 0
+            if (pasted) {
+                delay(80L)
+            }
+            return@withContext pasted
+        } finally {
+            previousClip?.let { saved ->
+                withContext(Dispatchers.Main) {
+                    runCatching {
+                        context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(saved)
+                    }
+                }
+            }
         }
-        val pasteRes = executor.execute("input keyevent 279", asRoot = false, timeoutMs = 4_000L)
-        pasteRes.exitCode == 0
     }
 
     override suspend fun pressKey(key: PhoneKey): Boolean = withContext(Dispatchers.IO) {
@@ -267,53 +281,6 @@ class RootPhoneController(
             timeoutMs = 6_000L,
         )
         res.exitCode == 0 && !res.stderr.contains("Error", ignoreCase = true)
-    }
-
-    override suspend fun dumpTopActivity(): String = withContext(Dispatchers.IO) {
-        val res = executor.execute(
-            command = "dumpsys activity top",
-            asRoot = false,
-            timeoutMs = 8_000L,
-        )
-        if (res.exitCode != 0 || res.stdout.isBlank()) {
-            return@withContext "Failed to dump top activity: ${res.stderr}"
-        }
-        summarizeActivityTop(res.stdout)
-    }
-
-    override suspend fun readNotifications(): String = withContext(Dispatchers.IO) {
-        val res = executor.execute(
-            command = "dumpsys notification --noredact",
-            asRoot = false,
-            timeoutMs = 8_000L,
-        )
-        if (res.exitCode != 0 || res.stdout.isBlank()) {
-            return@withContext "Failed to read notifications: ${res.stderr}"
-        }
-        parseActiveNotifications(res.stdout, ShellPolicyEngine.BLOCKED_SENSITIVE_PACKAGES)
-    }
-
-    override suspend fun openUri(
-        uri: String,
-        blockedPackages: Set<String>,
-        ownPackageName: String,
-    ): Boolean = withContext(Dispatchers.IO) {
-        val parsed = runCatching { Uri.parse(uri) }.getOrNull() ?: return@withContext false
-        val intent = Intent(Intent.ACTION_VIEW, parsed)
-        val resolved = context.packageManager.resolveActivity(intent, 0)?.activityInfo?.packageName
-        if (resolved == ownPackageName || (resolved != null && resolved in blockedPackages)) {
-            error("Target app ($resolved) is blocked or cannot be operated.")
-        }
-        if (blockedPackages.any { uri.contains(it, ignoreCase = true) }) {
-            error("URI targets a blocked sensitive app.")
-        }
-        val res = executor.execute(
-            command = "am start -a android.intent.action.VIEW -d ${shellSingleQuote(uri)}",
-            asRoot = false,
-            timeoutMs = 6_000L,
-        )
-        res.exitCode == 0 && !res.stdout.contains("Error:", ignoreCase = true) &&
-            !res.stderr.contains("Error:", ignoreCase = true)
     }
 
     private fun screenSize(): Point {
@@ -537,73 +504,3 @@ private fun parseFocusedPackage(dump: String, ownPackageName: String): String? =
     FOCUS_PKG_REGEX.find(dump)?.groupValues?.getOrNull(1)?.takeIf {
         it != ownPackageName && it != "com.android.systemui"
     }
-
-private fun summarizeActivityTop(raw: String): String {
-    val kept = mutableListOf<String>()
-    var inViewHierarchy = false
-    for (line in raw.lineSequence()) {
-        val trimmed = line.trimStart()
-        if (trimmed.startsWith("View Hierarchy:")) {
-            inViewHierarchy = true
-            continue
-        }
-        if (trimmed.startsWith("TASK ") || trimmed.startsWith("ACTIVITY ")) {
-            inViewHierarchy = false
-            kept += line.trimEnd()
-            continue
-        }
-        if (!inViewHierarchy) {
-            if (trimmed.startsWith("mResumed=") ||
-                trimmed.startsWith("Intent {") ||
-                trimmed.startsWith("Local FragmentActivity") ||
-                trimmed.startsWith("Added Fragments:") ||
-                trimmed.startsWith("#") ||
-                trimmed.startsWith("mFocused")
-            ) {
-                kept += line.trimEnd()
-            }
-        }
-        if (kept.size >= 120) break
-    }
-    return kept.joinToString("\n").take(6_000).ifBlank { raw.take(4_000) }
-}
-
-private fun parseActiveNotifications(raw: String, blockedPackages: Set<String>): String {
-    val entries = mutableListOf<String>()
-    var currentPkg = ""
-    var title = ""
-    var text = ""
-
-    fun flush() {
-        if (currentPkg.isNotBlank() && currentPkg !in blockedPackages && (title.isNotBlank() || text.isNotBlank())) {
-            val item = "[$currentPkg] ${title.ifBlank { "(no title)" }}: $text".trim()
-            if (item !in entries) entries += item
-        }
-        currentPkg = ""
-        title = ""
-        text = ""
-    }
-
-    for (line in raw.lineSequence()) {
-        val t = line.trim()
-        when {
-            t.startsWith("NotificationRecord(") -> {
-                flush()
-                val pkgIdx = t.indexOf("pkg=")
-                if (pkgIdx >= 0) {
-                    currentPkg = t.substring(pkgIdx + 4).substringBefore(' ').substringBefore(')')
-                }
-            }
-            t.startsWith("android.title=") -> {
-                title = t.removePrefix("android.title=").removePrefix("String (").removeSuffix(")")
-            }
-            t.startsWith("android.text=") -> {
-                text = t.removePrefix("android.text=").removePrefix("String (").removeSuffix(")")
-            }
-        }
-    }
-    flush()
-    return if (entries.isEmpty()) "(no active notifications)" else entries.take(50).joinToString("\n")
-}
-
-private fun shellSingleQuote(s: String): String = "'" + s.replace("'", "'\"'\"'") + "'"

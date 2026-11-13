@@ -214,17 +214,14 @@ int main(int argc, char *argv[]) {
         int status = 0;
         pid_t w = waitpid(child, &status, WNOHANG);
         if (w == child) {
-            /* Ensure any lingering background subshell in the group is also cleaned up on abort */
-            if (aborted) {
-                (void)kill(-child, SIGKILL);
-                if (lifeline_fd >= 0) close(lifeline_fd);
-                close(g_sig_pipe[0]);
-                close(g_sig_pipe[1]);
-                return 124;
-            }
+            /* Always sweep the isolated process group so background subshells cannot outlive the command */
+            (void)kill(-child, SIGKILL);
             if (lifeline_fd >= 0) close(lifeline_fd);
             close(g_sig_pipe[0]);
             close(g_sig_pipe[1]);
+            if (aborted) {
+                return 124;
+            }
             if (WIFEXITED(status)) {
                 return WEXITSTATUS(status);
             }

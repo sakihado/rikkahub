@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_DIR="${ANDROID_HOME:-$HOME/android-sdk}"
 
-echo "[devcontainer] 1/5 Installing gcc-aarch64-linux-gnu for safesdcard..."
+echo "[devcontainer] 1/5 Installing gcc-aarch64-linux-gnu for sdcard_ro..."
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu unzip curl
 

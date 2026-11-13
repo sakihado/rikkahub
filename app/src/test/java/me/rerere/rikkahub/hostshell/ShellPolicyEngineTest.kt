@@ -1,4 +1,4 @@
-package me.rerere.rikkahub.phoneuse
+package me.rerere.rikkahub.hostshell
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,6 +27,7 @@ class ShellPolicyEngineTest {
             "ip addr show wlan0",
             "sort -u /system/build.prop | uniq -c",
             "screencap -p",
+            "env LANG=C getprop ro.product.model",
         )
         for (cmd in allowed) {
             val res = ShellPolicyEngine.evaluate(cmd, asRoot = false)
@@ -35,7 +36,7 @@ class ShellPolicyEngineTest {
     }
 
     @Test
-    fun `state-changing, hidden file-writing or screen-injecting commands require approval`() {
+    fun `state-changing, variable-expanding, redirect or screen-injecting commands require approval`() {
         val askCommands = listOf(
             "pm clear com.example.demo",
             "pm uninstall com.example.demo",
@@ -48,6 +49,11 @@ class ShellPolicyEngineTest {
             "am force-stop com.example",
             "rm /sdcard/Download/temp.apk",
             "echo hello > /sdcard/Download/test.txt",
+            "echo hello >/dev/null_fake",
+            "cat <> /sdcard/Download/newfile.txt",
+            "A=-exec; B=rm; find /data/local/tmp -maxdepth 0 \$A \$B -rf /sdcard/target \\;",
+            "F=-f; P=/sdcard/victim.txt; logcat -d \$F \$P",
+            "dd if=/sdcard/test.bin of=/dev/null bs=1M",
             "sed -i 's/a/b/g' /sdcard/test.txt",
             "sed -n '1,20p' /system/build.prop",
             "sed -n 'w /sdcard/Download/out.txt' /system/build.prop",
@@ -87,27 +93,46 @@ class ShellPolicyEngineTest {
     }
 
     @Test
-    fun `root flag always triggers approval unless denied`() {
+    fun `root flag always triggers single-use approval unless denied`() {
         val res = ShellPolicyEngine.evaluate("ls -la /data/data/com.example.app", asRoot = true)
         assertEquals(PolicyDecision.ASK, res.decision)
-        assertTrue(res.canRememberInSession)
+        assertFalse("Root commands must always require explicit per-call approval", res.canRememberInSession)
     }
 
     @Test
-    fun `catastrophic, escalation, magisk-tampering and banking commands are hard denied`() {
+    fun `approval store isolates approvals per conversation and clears cleanly`() {
+        val store = ShellApprovalStore()
+        val cmd = "settings put system screen_brightness 120"
+        store.recordApproval(cmd, asRoot = false, conversationId = "conv-A")
+
+        assertTrue(store.hasApproval(cmd, asRoot = false, conversationId = "conv-A"))
+        assertFalse("Approval must never leak to another conversation", store.hasApproval(cmd, asRoot = false, conversationId = "conv-B"))
+
+        store.clearConversation("conv-A")
+        assertFalse(store.hasApproval(cmd, asRoot = false, conversationId = "conv-A"))
+    }
+
+    @Test
+    fun `catastrophic, escalation, quote-obfuscated, globbed and banking commands are hard denied`() {
         val denied = listOf(
             "dd if=/dev/zero of=/dev/block/by-name/boot",
             "mkfs.ext4 /dev/block/sda1",
             "reboot bootloader",
+            "toybox toybox reboot",
+            "env reboot",
             "svc power reboot",
             "/system/bin/toybox rm -rf /sdcard",
             "busybox rm -rf /",
             "rm -rf /storage/emulated/0/*",
             "find /sdcard -delete",
             "rm -rf /data/adb/modules/zygisk_sui",
-            "ls /data/adb/modules",
-            "su -c 'id'", // embedded su when asRoot=false
+            "ls /data/\"adb\"/modules",
+            "ls /data/ad*",
+            "ls /dev/bl*ck/by-name",
+            "su -c 'id'",
             "cat /data/data/com.eg.android.AlipayGphone/shared_prefs/main.xml",
+            "cat /data/data/com.eg.android.Alipay*/shared_prefs/main.xml",
+            "ls /data/data/com.x8bit.'bitwarden'",
             "pm clear cmb.pb",
             "sqlite3 -readonly /data/data/com.x8bit.bitwarden/databases/vault.db 'SELECT * FROM cipher'",
         )
@@ -116,14 +141,13 @@ class ShellPolicyEngineTest {
             assertEquals("Expected DENY for: $cmd (got ${res.decision}: ${res.reason})", PolicyDecision.DENY, res.decision)
         }
 
-        // Even with asRoot = true, /data/adb, block devices, and banking apps remain DENY!
         assertEquals(
             PolicyDecision.DENY,
-            ShellPolicyEngine.evaluate("rm -rf /data/adb/modules", asRoot = true).decision
+            ShellPolicyEngine.evaluate("rm -rf /data/adb/modules", asRoot = true).decision,
         )
         assertEquals(
             PolicyDecision.DENY,
-            ShellPolicyEngine.evaluate("ls /data/data/com.eg.android.AlipayGphone", asRoot = true).decision
+            ShellPolicyEngine.evaluate("ls /data/data/com.eg.android.AlipayGphone", asRoot = true).decision,
         )
     }
 }

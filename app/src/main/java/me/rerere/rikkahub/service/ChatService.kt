@@ -90,6 +90,8 @@ import me.rerere.rikkahub.data.model.withoutConversationFields
 import me.rerere.rikkahub.data.model.withoutUnresumableToolCalls
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.FolderRepository
+import me.rerere.rikkahub.hostshell.HostPrivilegeManager
+import me.rerere.rikkahub.hostshell.ShellApprovalStore
 import me.rerere.rikkahub.web.BadRequestException
 import me.rerere.rikkahub.web.NotFoundException
 import java.net.ConnectException
@@ -129,6 +131,8 @@ class ChatService(
     private val filesManager: FilesManager,
     private val folderRepository: FolderRepository,
     private val backgroundShellManager: BackgroundShellManager,
+    private val hostPrivilegeManager: HostPrivilegeManager? = null,
+    private val shellApprovalStore: ShellApprovalStore? = null,
 ) {
     /** 一次 agent 运行发给模型的消息，和回复要写进的节点 */
     private class ReplyTarget(val history: List<UIMessage>, val nodeId: Uuid) {
@@ -1394,6 +1398,30 @@ class ChatService(
         }
     }
 
+    // 会话级本机存储 (/sdcard 只读) 与只读状态探针 (host-sh) 挂载开关；随当前对话配置持久化，新对话默认关闭
+    suspend fun updateWorkspaceHostAccess(conversationId: Uuid, enabled: Boolean) {
+        if (enabled) {
+            hostPrivilegeManager?.ensurePrivilegedAccess(interactive = true)
+        }
+        withLoadedSession(conversationId) { session ->
+            val settings = settingsStore.awaitLoaded()
+            session.updateMetadata(
+                transform = { current ->
+                    val base = if (session.existsInDatabase && current.config == null) {
+                        current.bindConfig(settings)
+                    } else {
+                        current
+                    }
+                    base.copy(
+                        workspaceHostAccess = enabled,
+                        config = base.config?.copy(workspaceHostAccess = enabled),
+                    )
+                },
+                persist = conversationRepo::updateConversationConfig,
+            )
+        }
+    }
+
     suspend fun updateConversationSystemPrompt(conversationId: Uuid, systemPrompt: String?) {
         updateColumn(
             conversationId = conversationId,
@@ -1525,6 +1553,7 @@ class ChatService(
             previous?.let { filesManager.deleteChatFiles(it.files) }
         }
         sessionManager.removeIfIdle(session)
+        shellApprovalStore?.clearConversation(conversationId.toString())
         // 后台命令随会话一起终止, 撤销删除也不会恢复; 终止要等宽限期, 不阻塞删除
         appScope.launch { backgroundShellManager.killConversation(conversationId) }
     }

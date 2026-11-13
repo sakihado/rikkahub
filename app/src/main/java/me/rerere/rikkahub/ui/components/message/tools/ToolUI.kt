@@ -109,6 +109,7 @@ object ToolUIRegistry {
         ReadFileToolUI,
         WriteFileToolUI,
         ShellToolUI,
+        ExportFileToolUI,
         PhoneUseToolUI,
         AndroidShellToolUI,
     ).plus(MemoryFileToolUI.all).associateBy { it.toolName }

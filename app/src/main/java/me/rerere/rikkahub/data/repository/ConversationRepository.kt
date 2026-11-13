@@ -390,6 +390,7 @@ class ConversationRepository(
 
     fun conversationToConversationEntity(conversation: Conversation): ConversationEntity {
         require(conversation.messageNodes.none { it.messages.any { message -> message.hasBase64Part() } })
+        val syncedConfig = conversation.config?.copy(workspaceHostAccess = conversation.workspaceHostAccess)
         return ConversationEntity(
             id = conversation.id.toString(),
             title = conversation.title,
@@ -404,7 +405,7 @@ class ConversationRepository(
             lorebookIds = JsonInstant.encodeToString(conversation.lorebookIds),
             workspaceCwd = conversation.workspaceCwd ?: "",
             folderId = conversation.folderId?.toString() ?: "",
-            config = conversation.config?.let { JsonInstant.encodeToString(it) } ?: "",
+            config = syncedConfig?.let { JsonInstant.encodeToString(it) } ?: "",
         )
     }
 
@@ -412,6 +413,8 @@ class ConversationRepository(
         conversationEntity: ConversationEntity,
         messageNodes: List<MessageNode>
     ): Conversation {
+        val parsedConfig = conversationEntity.config.ifEmpty { null }
+            ?.let { JsonInstant.decodeFromString<me.rerere.rikkahub.data.model.ConversationConfig>(it) }
         return Conversation(
             id = Uuid.parse(conversationEntity.id),
             title = conversationEntity.title,
@@ -425,8 +428,9 @@ class ConversationRepository(
             modeInjectionIds = JsonInstant.decodeFromString(conversationEntity.modeInjectionIds),
             lorebookIds = JsonInstant.decodeFromString(conversationEntity.lorebookIds),
             workspaceCwd = conversationEntity.workspaceCwd.ifEmpty { null },
+            workspaceHostAccess = parsedConfig?.workspaceHostAccess ?: false,
             folderId = conversationEntity.folderId.ifEmpty { null }?.let { Uuid.parse(it) },
-            config = conversationEntity.config.ifEmpty { null }?.let { JsonInstant.decodeFromString(it) },
+            config = parsedConfig,
         )
     }
 
@@ -455,9 +459,10 @@ class ConversationRepository(
      * 只更新会话持有的配置（含注入绑定和工作目录），不重写消息节点。
      */
     suspend fun updateConversationConfig(conversation: Conversation) {
+        val syncedConfig = conversation.config?.copy(workspaceHostAccess = conversation.workspaceHostAccess)
         conversationDAO.updateConfig(
             id = conversation.id.toString(),
-            config = conversation.config?.let { JsonInstant.encodeToString(it) } ?: "",
+            config = syncedConfig?.let { JsonInstant.encodeToString(it) } ?: "",
             modeInjectionIds = JsonInstant.encodeToString(conversation.modeInjectionIds),
             lorebookIds = JsonInstant.encodeToString(conversation.lorebookIds),
             workspaceCwd = conversation.workspaceCwd ?: "",

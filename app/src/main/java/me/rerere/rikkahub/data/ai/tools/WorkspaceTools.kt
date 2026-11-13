@@ -1,6 +1,16 @@
 package me.rerere.rikkahub.data.ai.tools
 
+import android.content.ContentValues
+import android.content.Context
+import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -22,16 +32,20 @@ import me.rerere.workspace.WorkspaceLayout
 import me.rerere.workspace.WorkspaceManager
 import org.koin.java.KoinJavaComponent.getKoin
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.util.UUID
 import kotlin.uuid.Uuid
 
 private const val SHELL_TIMEOUT_MAX_SECONDS = 600L
 private const val MAX_READ_FILE_BYTES = 8L * 1024 * 1024
+const val WORKSPACE_EXPORT_FILE_TOOL_NAME = "workspace_export_file"
 
 val WorkspaceToolDefaultApprovals: Map<String, Boolean> = mapOf(
     "workspace_read_file" to false,
     "workspace_write_file" to false,
     "workspace_edit_file" to false,
     "workspace_shell" to true,
+    WORKSPACE_EXPORT_FILE_TOOL_NAME to true,
 )
 
 /** 直接写文件的工具, 只在支持 [WorkspaceCapabilities.fileWriteTools] 的工作区提供 */
@@ -46,9 +60,11 @@ suspend fun createWorkspaceTools(
     cwd: String? = null,
     conversationId: Uuid? = null,
     backgroundShellManager: BackgroundShellManager? = null,
+    hostAccess: Boolean = false,
+    appContext: Context? = null,
 ): List<Tool> {
     if (workspaceId.isNullOrBlank()) return emptyList()
-    val layout = workspaceRepository.layout(workspaceId) ?: return emptyList()
+    val layout = workspaceRepository.layout(workspaceId, hostAccess) ?: return emptyList()
     val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
     val approvalOverrides = workspace.toolApprovalOverrides()
     fun needsApproval(name: String) = resolveWorkspaceToolApproval(name, approvalOverrides)
@@ -60,15 +76,18 @@ suspend fun createWorkspaceTools(
         ?.let { manager -> conversationId?.let { BackgroundShell(manager, it) } }
 
     return buildList {
-        add(createReadFileTool(workspaceId, layout, ::needsApproval, workspaceRepository))
+        add(createReadFileTool(workspaceId, layout, ::needsApproval, workspaceRepository, hostAccess))
         if (workspace.capabilities().fileWriteTools) {
-            add(createWriteFileTool(workspaceId, layout, ::needsApproval, workspaceRepository))
-            add(createEditFileTool(workspaceId, layout, ::needsApproval, workspaceRepository))
+            add(createWriteFileTool(workspaceId, layout, ::needsApproval, workspaceRepository, hostAccess))
+            add(createEditFileTool(workspaceId, layout, ::needsApproval, workspaceRepository, hostAccess))
         }
-        add(createShellTool(workspaceId, layout, ::needsApproval, workspaceRepository, shellCwd, background))
+        add(createShellTool(workspaceId, layout, ::needsApproval, workspaceRepository, shellCwd, background, hostAccess))
         if (background != null) {
             add(createShellOutputTool(background))
             add(createShellKillTool(background))
+        }
+        if (appContext != null) {
+            add(createExportFileTool(appContext, workspaceId, layout, ::needsApproval, workspaceRepository, hostAccess))
         }
     }
 }
@@ -85,6 +104,7 @@ private fun createReadFileTool(
     layout: WorkspaceLayout,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    hostAccess: Boolean,
 ) = Tool(
     name = "workspace_read_file",
     description = """
@@ -104,9 +124,9 @@ private fun createReadFileTool(
     execute = {
         val path = it.jsonObject.absolutePath("path")
         if (path.isImagePath()) {
-            workspaceRepository.readImageInRootfs(workspaceId, path)
+            workspaceRepository.readImageInRootfs(workspaceId, path, hostAccess)
         } else {
-            val text = workspaceRepository.readTextInRootfs(workspaceId, path)
+            val text = workspaceRepository.readTextInRootfs(workspaceId, path, hostAccess)
             listOf(
                 UIMessagePart.Text(
                     buildJsonObject {
@@ -124,6 +144,7 @@ private fun createWriteFileTool(
     layout: WorkspaceLayout,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    hostAccess: Boolean,
 ) = Tool(
     name = "workspace_write_file",
     description = """
@@ -146,13 +167,21 @@ private fun createWriteFileTool(
             required = listOf("path", "text"),
         )
     },
-    needsApproval = { needsApproval("workspace_write_file") || it.pathOutsideWritableRoots(layout, "path") },
+    needsApproval = { input ->
+        // 只读挂载目录无需白弹一次确认框，直接进 execute 立即报错引导改用 workspace_export_file
+        if (input.isReadOnlyTarget(layout, "path")) {
+            false
+        } else {
+            needsApproval("workspace_write_file") || input.pathOutsideWritableRoots(layout, "path")
+        }
+    },
     execute = {
         val params = it.jsonObject
         val path = params.absolutePath("path")
+        rejectIfReadOnlyMount(layout, path)
         val text = params.string("text") ?: error("text is required")
         val overwrite = params["overwrite"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: true
-        val entry = workspaceRepository.writeAbsoluteText(workspaceId, path, text, overwrite)
+        val entry = workspaceRepository.writeAbsoluteText(workspaceId, path, text, overwrite, hostAccess)
         listOf(UIMessagePart.Text(entry.toJson().toString()))
     },
 )
@@ -162,6 +191,7 @@ private fun createEditFileTool(
     layout: WorkspaceLayout,
     needsApproval: (String) -> Boolean,
     workspaceRepository: WorkspaceRepository,
+    hostAccess: Boolean,
 ) = Tool(
     name = "workspace_edit_file",
     description = """
@@ -190,23 +220,30 @@ private fun createEditFileTool(
             required = listOf("path", "old_text", "new_text"),
         )
     },
-    needsApproval = { needsApproval("workspace_edit_file") || it.pathOutsideWritableRoots(layout, "path") },
+    needsApproval = { input ->
+        if (input.isReadOnlyTarget(layout, "path")) {
+            false
+        } else {
+            needsApproval("workspace_edit_file") || input.pathOutsideWritableRoots(layout, "path")
+        }
+    },
     execute = {
         val params = it.jsonObject
         val path = params.absolutePath("path")
+        rejectIfReadOnlyMount(layout, path)
         val oldText = params.string("old_text") ?: error("old_text is required")
         val newText = params.string("new_text") ?: error("new_text is required")
         val replaceAll = params["replace_all"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
         require(oldText.isNotEmpty()) { "old_text must not be empty" }
 
-        val original = workspaceRepository.readTextInRootfs(workspaceId, path)
+        val original = workspaceRepository.readTextInRootfs(workspaceId, path, hostAccess)
         // 逐级尝试 exact -> line_trimmed -> block_anchor 替换器, 见 TextReplacers.kt
         val result = try {
             replaceText(original, oldText, newText, replaceAll)
         } catch (e: IllegalArgumentException) {
             error("${e.message} (path: $path)")
         }
-        val entry = workspaceRepository.writeAbsoluteText(workspaceId, path, result.updated, overwrite = true)
+        val entry = workspaceRepository.writeAbsoluteText(workspaceId, path, result.updated, overwrite = true, hostAccess)
         val diff = generateUnifiedDiff(original, result.updated, entry.path)
         listOf(
             UIMessagePart.Text(
@@ -224,6 +261,188 @@ private fun createEditFileTool(
     },
 )
 
+/**
+ * 在不向容器开放 `/sdcard` 写权限的前提下，允许 AI 申请将工作区内生成的产物文件（APK / PDF / ZIP 等）
+ * 经用户弹窗确认后由宿主安全流式导出到手机系统的 `Download/RikkaHub` 目录（无论当前会话是否开启 `/sdcard` 只读挂载均可用）。
+ */
+private fun createExportFileTool(
+    appContext: Context,
+    workspaceId: String,
+    layout: WorkspaceLayout,
+    needsApproval: (String) -> Boolean,
+    workspaceRepository: WorkspaceRepository,
+    hostAccess: Boolean,
+) = Tool(
+    name = WORKSPACE_EXPORT_FILE_TOOL_NAME,
+    description = """
+        Export a file from the workspace to the user's phone Downloads folder (`Download/RikkaHub`).
+        Works even when phone storage is not mounted or mounted strictly read-only.
+        Requires user approval in the chat UI before writing to device storage.
+    """.trimIndent().replace("\n", " "),
+    parameters = {
+        InputSchema.Obj(
+            properties = buildJsonObject {
+                put("source_path", buildJsonObject {
+                    put("type", "string")
+                    put("description", "Absolute path of the source file inside the workspace (e.g. ${layout.workspaceDir}/dist/app.apk)")
+                })
+                put("file_name", buildJsonObject {
+                    put("type", "string")
+                    put("description", "Optional file name under Download/RikkaHub (plain file name without '/'). Defaults to source file's base name.")
+                })
+                put("overwrite", buildJsonObject {
+                    put("type", "boolean")
+                    put("description", "Overwrite if a file with the same name already exists in Download/RikkaHub. Defaults to false (auto-renames with suffix).")
+                })
+            },
+            required = listOf("source_path"),
+        )
+    },
+    needsApproval = { needsApproval(WORKSPACE_EXPORT_FILE_TOOL_NAME) },
+    execute = { input ->
+        val params = input.jsonObject
+        val sourcePath = params.absolutePath("source_path")
+        val rawName = params.string("file_name")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: sourcePath.substringAfterLast('/')
+        val cleanName = sanitizeExportFileName(rawName)
+        val overwrite = params["overwrite"]?.jsonPrimitive?.let {
+            it.booleanOrNull ?: it.contentOrNull?.toBooleanStrictOrNull()
+        } ?: false
+
+        // 先校验源文件存在且为普通文件
+        val sizeBytes = workspaceRepository.absoluteFileSize(workspaceId, sourcePath, hostAccess)
+        val exported = exportWorkspaceStreamToDownloads(
+            context = appContext,
+            fileName = cleanName,
+            overwrite = overwrite,
+        ) { outputStream ->
+            workspaceRepository.exportAbsoluteFile(workspaceId, sourcePath, outputStream, hostAccess)
+        }
+
+        listOf(
+            UIMessagePart.Text(
+                buildJsonObject {
+                    put("sourcePath", sourcePath)
+                    put("exportedPath", exported.displayPath)
+                    put("fileName", exported.finalName)
+                    put("sizeBytes", sizeBytes)
+                }.toString()
+            )
+        )
+    },
+)
+
+private data class ExportedDownloadResult(
+    val finalName: String,
+    val displayPath: String,
+)
+
+internal fun sanitizeExportFileName(raw: String): String {
+    require('/' !in raw && '\\' !in raw && '\u0000' !in raw) {
+        "file_name must be a plain file name without directory separators: $raw"
+    }
+    val trimmed = raw.trim()
+    require(trimmed.isNotEmpty() && trimmed != "." && trimmed != "..") {
+        "Invalid export file_name: $raw"
+    }
+    return trimmed
+}
+
+private suspend fun exportWorkspaceStreamToDownloads(
+    context: Context,
+    fileName: String,
+    overwrite: Boolean,
+    writeContent: suspend (java.io.OutputStream) -> Unit,
+): ExportedDownloadResult = withContext(Dispatchers.IO) {
+    val ext = fileName.substringAfterLast('.', "").lowercase()
+    val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+
+    // 优先在拥有所有文件访问权限（Sui/Root 已开通或用户在系统设置授权）时直接原子写入目标文件，精确可控重名行为
+    val canWriteFileDirectly = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || Environment.isExternalStorageManager()
+    if (canWriteFileDirectly) {
+        val downloadsRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val rikkaDir = File(downloadsRoot, "RikkaHub").apply { mkdirs() }
+        if (rikkaDir.isDirectory && rikkaDir.canWrite()) {
+            val target = resolveNonCollidingFile(rikkaDir, fileName, overwrite)
+            val tmpFile = File(rikkaDir, ".export_${UUID.randomUUID()}.tmp")
+            try {
+                tmpFile.outputStream().use { out -> writeContent(out) }
+                if (overwrite && target.exists()) {
+                    target.delete()
+                }
+                if (!tmpFile.renameTo(target)) {
+                    tmpFile.copyTo(target, overwrite = overwrite)
+                    tmpFile.delete()
+                }
+            } finally {
+                if (tmpFile.exists()) tmpFile.delete()
+            }
+            MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf(mimeType), null)
+            return@withContext ExportedDownloadResult(
+                finalName = target.name,
+                displayPath = "/sdcard/Download/RikkaHub/${target.name}",
+            )
+        }
+    }
+
+    // 无全盘存储权限时（例如纯未授权孤岛设备），在 Android 10+ 走免权限的 MediaStore.Downloads
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = context.contentResolver
+        val relativeDir = "${Environment.DIRECTORY_DOWNLOADS}/RikkaHub/"
+        if (overwrite) {
+            runCatching {
+                resolver.delete(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                    arrayOf(relativeDir, fileName),
+                )
+            }
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("Failed to create entry in Download/RikkaHub via MediaStore")
+        try {
+            val out = resolver.openOutputStream(uri)
+                ?: error("Failed to open output stream for Download/RikkaHub/$fileName")
+            out.use { writeContent(it) }
+            val publishValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }
+            resolver.update(uri, publishValues, null, null)
+            val resolvedName = runCatching {
+                resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                }
+            }.getOrNull() ?: fileName
+            return@withContext ExportedDownloadResult(
+                finalName = resolvedName,
+                displayPath = "/sdcard/Download/RikkaHub/$resolvedName",
+            )
+        } catch (e: Throwable) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+    }
+
+    error("Storage permission is required to export files to Download/RikkaHub on Android 9 and below.")
+}
+
+private fun resolveNonCollidingFile(dir: File, fileName: String, overwrite: Boolean): File {
+    val direct = File(dir, fileName)
+    if (overwrite || !direct.exists()) return direct
+    val dotIdx = fileName.lastIndexOf('.')
+    val stem = if (dotIdx > 0) fileName.substring(0, dotIdx) else fileName
+    val suffix = if (dotIdx > 0) fileName.substring(dotIdx) else ""
+    return generateSequence(1) { it + 1 }
+        .map { File(dir, "$stem ($it)$suffix") }
+        .first { !it.exists() }
+}
+
 private class BackgroundShell(val manager: BackgroundShellManager, val conversationId: Uuid)
 
 private fun createShellTool(
@@ -233,6 +452,7 @@ private fun createShellTool(
     workspaceRepository: WorkspaceRepository,
     defaultCwd: String? = null,
     background: BackgroundShell? = null,
+    hostAccess: Boolean = false,
 ) = Tool(
     name = "workspace_shell",
     description = buildString {
@@ -301,13 +521,13 @@ private fun createShellTool(
         val cwd = layout.relativeToWorkspace(params.string("cwd") ?: defaultCwd.orEmpty())
         val runInBackground = params.string("run_in_background")?.toBooleanStrictOrNull() ?: false
         val output = if (runInBackground && background != null) {
-            background.manager.start(background.conversationId, workspaceId, command, cwd).toJson()
+            background.manager.start(background.conversationId, workspaceId, command, cwd, hostAccess).toJson()
         } else {
             val timeoutMillis = params.string("timeout")?.toLongOrNull()
                 ?.coerceIn(1L, SHELL_TIMEOUT_MAX_SECONDS)
                 ?.times(1_000L)
                 ?: WorkspaceManager.DEFAULT_COMMAND_TIMEOUT_MS
-            val result = workspaceRepository.executeCommand(workspaceId, command, cwd, timeoutMillis)
+            val result = workspaceRepository.executeCommand(workspaceId, command, cwd, timeoutMillis, hostAccess = hostAccess)
             buildJsonObject {
                 put("exitCode", result.exitCode)
                 put("stdout", result.stdout)
@@ -401,7 +621,8 @@ private fun kotlinx.serialization.json.JsonObject.string(name: String): String? 
 private suspend fun WorkspaceRepository.readTextInRootfs(
     workspaceId: String,
     path: String,
-): String = readRootfsBuffer(workspaceId, path).toString(Charsets.UTF_8.name())
+    hostAccess: Boolean,
+): String = readRootfsBuffer(workspaceId, path, hostAccess).toString(Charsets.UTF_8.name())
 
 /**
  * 按环境内绝对路径读入内存。路径映射交给工作区后端, 本地工作区由它统一处理
@@ -410,19 +631,21 @@ private suspend fun WorkspaceRepository.readTextInRootfs(
 private suspend fun WorkspaceRepository.readRootfsBuffer(
     workspaceId: String,
     path: String,
+    hostAccess: Boolean,
 ): ByteArrayOutputStream {
-    val size = absoluteFileSize(workspaceId, path)
+    val size = absoluteFileSize(workspaceId, path, hostAccess)
     require(size <= MAX_READ_FILE_BYTES) {
         "File is too large to read: $path (${size / 1024 / 1024}MB, max ${MAX_READ_FILE_BYTES / 1024 / 1024}MB). Use shell commands like head, tail, or grep to read parts of it."
     }
-    return ByteArrayOutputStream(size.toInt()).also { exportAbsoluteFile(workspaceId, path, it) }
+    return ByteArrayOutputStream(size.toInt()).also { exportAbsoluteFile(workspaceId, path, it, hostAccess) }
 }
 
 private suspend fun WorkspaceRepository.readImageInRootfs(
     workspaceId: String,
     path: String,
+    hostAccess: Boolean,
 ): List<UIMessagePart> {
-    val bytes = readRootfsBuffer(workspaceId, path).toByteArray()
+    val bytes = readRootfsBuffer(workspaceId, path, hostAccess).toByteArray()
 
     val filesManager = getKoin().get<FilesManager>()
     val uris = filesManager.createChatFilesByByteArrays(listOf(bytes))
@@ -444,6 +667,19 @@ private fun kotlinx.serialization.json.JsonObject.absolutePath(name: String): St
     require(!path.contains('\u0000')) { "$name contains invalid character" }
     return path
 }
+
+private fun rejectIfReadOnlyMount(layout: WorkspaceLayout, path: String) {
+    require(!layout.isReadOnly(path)) {
+        "Path is mounted strictly read-only: $path. Write files inside ${layout.workspaceDir} instead, and call $WORKSPACE_EXPORT_FILE_TOOL_NAME if you want to export a file to the user's Download/RikkaHub folder."
+    }
+}
+
+private fun kotlinx.serialization.json.JsonElement.isReadOnlyTarget(
+    layout: WorkspaceLayout,
+    name: String,
+): Boolean = runCatching {
+    layout.isReadOnly(jsonObject.absolutePath(name))
+}.getOrDefault(false)
 
 // 免强制审批的可写安全区由工作区后端给出, 本地为工作区文件目录、临时目录和技能目录
 private fun kotlinx.serialization.json.JsonElement.pathOutsideWritableRoots(

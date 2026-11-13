@@ -53,9 +53,10 @@ class ChatToolFactory(
         model: Model,
         conversationId: Uuid,
         workspaceCwd: String? = null,
+        workspaceHostAccess: Boolean = false,
     ): List<Tool> {
         val workspaceTools =
-            createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd, conversationId)
+            createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd, conversationId, workspaceHostAccess)
         val tools = buildList {
             if (assistant.enableMemory) {
                 addAll(buildMemoryTools(memoryRepository, assistant.memoryId))
@@ -63,7 +64,7 @@ class ChatToolFactory(
             if (shouldUseExternalWebSearch(assistant, model)) {
                 addAll(createSearchTools(settings))
             }
-            addAll(localTools.getTools(assistant.localTools))
+            addAll(localTools.getTools(assistant.localTools, conversationId))
             if (assistant.enableRecentChatsReference) {
                 addAll(createConversationTools(conversationRepository, assistant.id))
             }
@@ -139,6 +140,7 @@ class ChatToolFactory(
         workspaceId: String?,
         cwd: String?,
         conversationId: Uuid,
+        hostAccess: Boolean,
     ): List<Tool> {
         if (workspaceId.isNullOrBlank()) return emptyList()
         val workspace = workspaceRepository.getById(workspaceId) ?: return emptyList()
@@ -149,11 +151,18 @@ class ChatToolFactory(
             )
             return emptyList()
         }
-        // 本地 PRoot 工作区启用了宿主机桥接与共享存储时，按需确保已获取 Sui/Shizuku/Root 特权与存储权限，
-        // 这样即便用户未开启独立的 AndroidShell 本地工具，工作区也能直接读写 /sdcard 并调用 host-sh。
-        if (!workspace.isSsh() && workspace.hostBridgeEnabled()) {
+        val effectiveHostAccess = !workspace.isSsh() && hostAccess
+        if (effectiveHostAccess) {
             localTools.ensureHostPrivilegeIfNeeded()
         }
-        return createWorkspaceTools(workspaceId, workspaceRepository, cwd, conversationId, backgroundShellManager)
+        return createWorkspaceTools(
+            workspaceId = workspaceId,
+            workspaceRepository = workspaceRepository,
+            cwd = cwd,
+            conversationId = conversationId,
+            backgroundShellManager = backgroundShellManager,
+            hostAccess = effectiveHostAccess,
+            appContext = if (workspace.isSsh()) null else context,
+        )
     }
 }

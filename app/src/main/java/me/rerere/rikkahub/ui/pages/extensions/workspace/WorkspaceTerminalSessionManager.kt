@@ -143,7 +143,6 @@ class WorkspaceTerminalSessionManager internal constructor(
                         workspaceManager.prepareTerminal(
                             root = root,
                             nameservers = appContext.activeDnsServers(),
-                            hostBridgeEnabled = workspace.hostBridgeEnabled(),
                         )
                         true
                     }
@@ -215,7 +214,6 @@ class WorkspaceTerminalSessionManager internal constructor(
             workspaceManager.terminalLaunch(
                 root = workspace.root,
                 shellCompatibilityMode = workspace.shellCompatibilityMode,
-                hostBridgeEnabled = workspace.hostBridgeEnabled(),
             )?.toTransport()
                 ?: error("Interactive terminal is not supported")
         }

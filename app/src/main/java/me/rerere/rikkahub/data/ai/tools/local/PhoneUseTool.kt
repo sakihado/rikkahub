@@ -43,7 +43,7 @@ private const val SWIPE_MS = 350L
 private const val SCREENSHOT_MAX_SIDE = 1568
 
 /**
- * 不允许 AI 操作的应用：支付和银行类
+ * 不允许 AI 操作的应用：支付、银行与密码管理器类
  * 不能打开，从别的应用跳转进去后也不能读屏和操作，只能返回或回到桌面
  */
 internal val PHONE_USE_BLOCKED_APPS = setOf(
@@ -59,11 +59,17 @@ internal val PHONE_USE_BLOCKED_APPS = setOf(
     "com.bankcomm.Bankcomm", // 交通银行
     "cmb.pb", // 招商银行
     "com.yitong.mbank.psbc", // 邮储银行
+    "com.x8bit.bitwarden", // Bitwarden
+    "com.kunzisoft.keepass.free", // KeePassDX
+    "com.kunzisoft.keepass.libre", // KeePassDX Libre
+    "keepass2android.keepass2android", // Keepass2Android
+    "com.agilebits.onepassword", // 1Password
+    "proton.android.pass", // Proton Pass
+    "com.dashlane", // Dashlane
 )
 
 private val ACTIONS = listOf(
-    "observe", "screenshot", "tap", "long_press", "swipe", "scroll", "type", "press",
-    "open_app", "open_uri", "list_apps", "dump_activity", "notifications", "wait",
+    "observe", "screenshot", "tap", "long_press", "swipe", "scroll", "type", "press", "open_app", "list_apps", "wait",
 )
 
 /** 悬浮窗和通知里显示当前在做哪个动作；参数还在流式输出时解析不出来，返回 null */
@@ -93,16 +99,15 @@ internal fun buildPhoneUseTool(
     return Tool(
         name = PHONE_USE_TOOL_NAME,
         description = """
-            Operate the user's Android phone: read the screen, tap, swipe, type, inspect top activity/notifications, and open apps or deep links.
-            Workflow: open_app / open_uri (or press home) first, then observe to get the on-screen elements, then act.
+            Operate the user's Android phone: read the screen, tap, swipe, type and open apps.
+            Workflow: open_app (or press home) first, then observe to get the on-screen elements, then act.
             Every action that changes the screen returns the new element list, so you rarely need to call observe again.
             Prefer targeting elements by their index from the latest element list; indexes are only valid for that list.
-            Use dump_activity to inspect the current Activity/Intent/Fragments or notifications to read status bar notifications without taking screenshots.
             Coordinates are on a $GRID x $GRID grid: (0,0) is the top-left of the screen and ($GRID,$GRID) the bottom-right,
             in both the element list and screenshots.
             Use screenshot only when the element list is not enough (images, canvas, games, custom views).
             This app itself cannot be operated; leave it with open_app or press home before acting.
-            Payment and banking apps are blocked: you cannot open, read or operate them. If a task ends up in one,
+            Payment, banking and password-manager apps are blocked: you cannot open, read or operate them. If a task ends up in one,
             press back or home and tell the user to finish that step themselves.
             Stop and ask the user before irreversible steps such as paying, sending messages or deleting data,
             unless they already told you to do exactly that.
@@ -121,9 +126,6 @@ internal fun buildPhoneUseTool(
                                 "scroll: scroll the content in 'direction', optionally inside 'element'. " +
                                 "type: replace the text of an input field ('element', or the focused field) with 'text'. " +
                                 "press: press 'key'. open_app: launch an app by 'app' (name or package). " +
-                                "open_uri: open a deep link or URI via 'uri'. " +
-                                "dump_activity: inspect top resumed Activity, Intent and Fragments (zero screenshot tokens). " +
-                                "notifications: read active status-bar notifications without pulling down shade. " +
                                 "list_apps: list installed apps. wait: wait 'seconds' for loading."
                         )
                     })
@@ -152,10 +154,6 @@ internal fun buildPhoneUseTool(
                     put("app", buildJsonObject {
                         put("type", "string")
                         put("description", "App name or package name for open_app")
-                    })
-                    put("uri", buildJsonObject {
-                        put("type", "string")
-                        put("description", "Deep link or URL for open_uri (e.g. https://... or bilibili://...)")
                     })
                     put("seconds", buildJsonObject { put("type", "number"); put("description", "For wait, up to 10") })
                 },
@@ -194,7 +192,7 @@ private class PhoneUseSession(
             ensureControllerReady()
         }
         val controller = manager.controller.value ?: error(
-            "Phone Use is not enabled. Grant Root/Sui permission to RikkaHub, or turn on \"RikkaHub Phone Use\" in the system accessibility settings."
+            "Phone Use is not enabled. Grant Sui/Shizuku/Root permission to RikkaHub, or turn on \"RikkaHub Phone Use\" in the system accessibility settings."
         )
         when (val action = params.string("action") ?: error("action is required")) {
             "list_apps" -> text(
@@ -212,30 +210,6 @@ private class PhoneUseSession(
                 check(controller.openApp(app.packageName)) { "Failed to open ${app.label}" }
                 delay(OPEN_APP_SETTLE_MS)
                 text("Opened ${app.label}.\n" + describeCurrent(controller))
-            }
-
-            "open_uri" -> {
-                val uri = params.string("uri")?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: error("uri is required for open_uri")
-                check(controller.openUri(uri, PHONE_USE_BLOCKED_APPS, ownPackageName)) {
-                    "Failed to open URI (or unsupported in accessibility-only mode without Root): $uri"
-                }
-                delay(OPEN_APP_SETTLE_MS)
-                text("Opened URI: $uri\n" + describeCurrent(controller))
-            }
-
-            "dump_activity" -> {
-                ensureOperable(controller)
-                val dump = controller.dumpTopActivity()
-                    ?: "dump_activity requires Root/Shell backend; use observe instead."
-                text(dump)
-            }
-
-            "notifications" -> {
-                controller.visiblePackages().blocked()?.let { error(blockedMessage(it)) }
-                val notifs = controller.readNotifications()
-                    ?: "notifications action requires Root/Shell backend; press notifications key in accessibility mode."
-                text(notifs)
             }
 
             "wait" -> {

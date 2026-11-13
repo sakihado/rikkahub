@@ -32,6 +32,7 @@ import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.ListItemShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedListItem
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -71,6 +72,7 @@ import me.rerere.hugeicons.stroke.Codesandbox
 import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.hugeicons.stroke.Files02
 import me.rerere.hugeicons.stroke.Folder01
+import me.rerere.hugeicons.stroke.Database02
 import me.rerere.hugeicons.stroke.Image02
 import me.rerere.hugeicons.stroke.MusicNote03
 import me.rerere.hugeicons.stroke.Package
@@ -126,6 +128,7 @@ internal fun FilesPicker(
     onTrimHistory: (keepRecentMessages: Int) -> Job,
     onUpdateAssistant: (Assistant) -> Unit,
     onUpdateWorkspaceCwd: (String?) -> Unit,
+    onUpdateWorkspaceHostAccess: (Boolean) -> Unit,
     onUpdateSearchMode: (SearchMode) -> Unit,
     onUpdateSearchService: (Int) -> Unit,
     showCompressDialog: Boolean,
@@ -149,6 +152,9 @@ internal fun FilesPicker(
         workspaces.find { it.id == assistant.workspaceId?.toString() }
     }
     val showCwd = boundWorkspace != null && boundWorkspace.shellStatus == WorkspaceShellStatus.READY.name
+    // 本机只读存储是会话开关，只对本地工作区有意义
+    val showHostAccess = boundWorkspace != null && !boundWorkspace.isSsh() &&
+        boundWorkspace.shellStatus == WorkspaceShellStatus.READY.name
     var showCwdSheet by remember { mutableStateOf(false) }
     var showCompactAttachmentsDialog by remember { mutableStateOf(false) }
     var showTrimHistoryDialog by remember { mutableStateOf(false) }
@@ -256,7 +262,13 @@ internal fun FilesPicker(
                 // 限制了上下文消息数就是滚动上下文，旧消息会自动移出，不需要压缩
                 val showCompress = assistant.contextMessageLimit <= 0
                 // 压缩附件、裁剪历史和滚动上下文无关：窗口内的附件或大工具输出一样可能撑爆上下文与体积
-                val itemCount = 4 + listOf(showWorkspace, showWorkspace && showCwd, showMcp, showCompress).count { it }
+                val itemCount = 4 + listOf(
+                    showWorkspace,
+                    showWorkspace && showCwd,
+                    showWorkspace && showHostAccess,
+                    showMcp,
+                    showCompress,
+                ).count { it }
                 var itemIndex = 0
                 Column(
                     verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
@@ -310,6 +322,36 @@ internal fun FilesPicker(
                                     maxLines = 1,
                                     overflow = TextOverflow.StartEllipsis,
                                 )
+                            }
+                        }
+
+                        if (showHostAccess) {
+                            SegmentedListItem(
+                                onClick = { onUpdateWorkspaceHostAccess(!conversation.workspaceHostAccess) },
+                                shapes = ListItemDefaults.segmentedShapes(index = itemIndex++, count = itemCount),
+                                leadingContent = {
+                                    Icon(
+                                        imageVector = HugeIcons.Database02,
+                                        contentDescription = stringResource(R.string.chat_host_access_title),
+                                    )
+                                },
+                                trailingContent = {
+                                    Switch(
+                                        checked = conversation.workspaceHostAccess,
+                                        onCheckedChange = onUpdateWorkspaceHostAccess,
+                                    )
+                                },
+                            ) {
+                                Column {
+                                    Text(stringResource(R.string.chat_host_access_title))
+                                    Text(
+                                        text = stringResource(R.string.chat_host_access_desc),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
                         }
                     }

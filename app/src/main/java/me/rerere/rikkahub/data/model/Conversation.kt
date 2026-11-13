@@ -34,6 +34,8 @@ data class Conversation(
     val config: ConversationConfig? = null,
     // Absolute path inside the workspace rootfs
     val workspaceCwd: String? = null,
+    // 当前会话是否启用本地工作区的本机只读存储 (/sdcard) 与只读状态探针 (host-sh)，默认关闭
+    val workspaceHostAccess: Boolean = false,
     // 所属文件夹（助手内分组），null 表示未归入任何文件夹
     val folderId: Uuid? = null,
     @Transient

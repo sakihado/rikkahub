@@ -1223,6 +1223,7 @@
   <string name="workspace_detail_tool_delete_file">Delete File</string>
   <string name="workspace_detail_tool_move_file">Move File</string>
   <string name="workspace_detail_tool_shell">Execute Command</string>
+  <string name="workspace_detail_tool_export_file">Export File</string>
   <string name="workspace_detail_install_rootfs_desc">Will download tar.gz and extract to the linux directory of %s.</string>
   <string name="workspace_detail_download_url">tar.gz download URL</string>
   <string name="workspace_detail_area_files">Files</string>
@@ -1393,8 +1394,10 @@
   <string name="imggen_page_select_image">Select image</string>
   <string name="workspace_detail_compatibility_mode">Compatibility mode</string>
   <string name="workspace_detail_compatibility_mode_desc">Try enabling this if the terminal fails to start. It may reduce performance. Applies to new terminal tabs and subsequent commands.</string>
-  <string name="workspace_detail_host_bridge">Host Bridge &amp; Shared Storage (/sdcard &amp; host-sh)</string>
-  <string name="workspace_detail_host_bridge_desc">Allow this workspace to access /sdcard (with trash protection) and run read-only Android host commands via host-sh. Disable for strict sandbox isolation.</string>
+  <string name="chat_host_access_title">Read-only phone storage</string>
+  <string name="chat_host_access_desc">Mount /sdcard read-only and allow host-sh probes for this chat only</string>
+  <string name="chat_host_access_chip">/sdcard read-only</string>
+  <string name="tool_ui_export_file_title">Export: %s</string>
   <string name="workspace_detail_settings_save_failed">Failed to save settings</string>
   <string name="setting_display_page_background_effect_title">Input bar background effect</string>
   <string name="setting_display_page_background_effect_desc">Enable a blur or glass effect on the chat input bar</string>
@@ -1887,10 +1890,6 @@
   <string name="chat_message_tool_phone_use_open_app_name">Open app: %1$s</string>
   <string name="chat_message_tool_phone_use_list_apps">List apps</string>
   <string name="chat_message_tool_phone_use_wait">Wait %1$s seconds</string>
-  <string name="chat_message_tool_phone_use_open_uri">Open link</string>
-  <string name="chat_message_tool_phone_use_open_uri_target">Open link: %1$s</string>
-  <string name="chat_message_tool_phone_use_dump_activity">Inspect top activity</string>
-  <string name="chat_message_tool_phone_use_notifications">Read notifications</string>
   <string name="assistant_page_local_tools_phone_use_root_active">Active via %1$s (Accessibility service not required)</string>
   <string name="assistant_page_local_tools_phone_use_root_ready">Phone Use attached via %1$s</string>
   <string name="assistant_page_local_tools_android_shell_title">Android Shell (Sui / Shizuku / Root)</string>

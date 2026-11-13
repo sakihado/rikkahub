@@ -1,6 +1,7 @@
-package me.rerere.rikkahub.phoneuse
+package me.rerere.rikkahub.hostshell
 
 import me.rerere.rikkahub.data.ai.tools.local.PHONE_USE_BLOCKED_APPS
+import java.util.concurrent.ConcurrentHashMap
 
 enum class PolicyDecision {
     /** 窄白名单内的纯只读查询：免审批静默执行 */
@@ -19,46 +20,49 @@ data class PolicyEvaluation(
 )
 
 /**
- * 会话级命令审批缓存（与底层进程执行器解耦，专职记录本进程生命周期内已获用户批准的可复用命令）
+ * 严格按单次对话 (`conversationId`) 隔离的命令审批缓存：
+ * 仅在当前对话内复用已获用户确认的非破坏性命令，绝不跨对话或跨智能体串权；对话删除时同步清理。
  */
 class ShellApprovalStore {
-    private val approvedKeys: MutableSet<String> = java.util.Collections.synchronizedSet(LinkedHashSet())
+    private val approvalsByConversation = ConcurrentHashMap<String, MutableSet<String>>()
 
-    fun hasApproval(command: String, asRoot: Boolean): Boolean =
-        key(command, asRoot) in approvedKeys
+    fun hasApproval(command: String, asRoot: Boolean, conversationId: String = DEFAULT_SCOPE): Boolean =
+        approvalsByConversation[conversationId]?.contains(key(command, asRoot)) == true
 
-    fun recordApproval(command: String, asRoot: Boolean) {
-        approvedKeys += key(command, asRoot)
+    fun recordApproval(command: String, asRoot: Boolean, conversationId: String = DEFAULT_SCOPE) {
+        val set = approvalsByConversation.computeIfAbsent(conversationId) {
+            java.util.Collections.synchronizedSet(LinkedHashSet())
+        }
+        set += key(command, asRoot)
+    }
+
+    fun clearConversation(conversationId: String) {
+        approvalsByConversation.remove(conversationId)
     }
 
     fun clear() {
-        approvedKeys.clear()
+        approvalsByConversation.clear()
     }
 
     private fun key(command: String, asRoot: Boolean): String =
         "${if (asRoot) "root" else "shell"}:${command.trim()}"
+
+    companion object {
+        private const val DEFAULT_SCOPE = "__default__"
+    }
 }
 
 /**
- * 统一宿主命令策略引擎（供 android_shell、工作区 host-sh、PhoneUse 共同调用）
+ * 统一宿主命令策略引擎（专供特权智能体的 `android_shell` 调用）
  *
- * 参考 Claude Code 权限模型：
  * 1. 按复合操作符拆分所有子命令独立评估
  * 2. 优先级严格遵守 DENY > ASK > ALLOW
  * 3. 白名单外默认一律归入 ASK，不依赖黑名单穷举未知高危命令
  */
 object ShellPolicyEngine {
 
-    /** 金融、支付与核心密码管理器包名红线 */
-    val BLOCKED_SENSITIVE_PACKAGES: Set<String> = PHONE_USE_BLOCKED_APPS + setOf(
-        "com.x8bit.bitwarden",
-        "com.kunzisoft.keepass.free",
-        "com.kunzisoft.keepass.libre",
-        "keepass2android.keepass2android",
-        "com.agilebits.onepassword",
-        "proton.android.pass",
-        "com.dashlane",
-    )
+    /** 金融、支付与核心密码管理器包名红线（与 PhoneUse 共用同一份权威名单） */
+    val BLOCKED_SENSITIVE_PACKAGES: Set<String> = PHONE_USE_BLOCKED_APPS
 
     private val PROTECTED_ROOT_PATHS = setOf(
         "/",
@@ -193,8 +197,9 @@ object ShellPolicyEngine {
         "strings",
     )
 
-    private val SAFE_REDIRECT_REGEX = Regex("""(?:[12&]?>>?\s*/dev/null|[12]>&[12])""")
-    private val OUTPUT_REDIRECT_REGEX = Regex("""(?<![<>])>>?(?![>&])""")
+    private val SAFE_REDIRECT_REGEX =
+        Regex("""(?:[12&]?>>?\s*/dev/null(?=\s|$|[;|&)])|[12]>&[12](?=\s|$|[;|&)]))""")
+    private val OUTPUT_REDIRECT_REGEX = Regex("""<>|(?<![<>])>>?(?![>&])""")
     private val ADB_PATH_REGEX = Regex("""(^|[\s'"=/])/data/adb(/|[\s'"]|$)""")
     private val BLOCK_DEV_REGEX = Regex("""(^|[\s'"=])/dev/block(/|[\s'"]|$)""")
 
@@ -204,22 +209,33 @@ object ShellPolicyEngine {
             return PolicyEvaluation(PolicyDecision.DENY, "命令不能为空")
         }
 
-        // 1. 全局红线扫描（即使嵌套在 $() 或引号中也绝不放过）
-        BLOCKED_SENSITIVE_PACKAGES.firstOrNull { pkg -> containsPackageToken(trimmed, pkg) }?.let { pkg ->
+        // 折叠引号拼接（如 `/data/"adb"` 或 `com.x8bit.'bitwarden'`）并检测通配符绕过
+        val collapsed = collapseQuotes(trimmed)
+
+        // 1. 全局红线扫描（同时检查原始串、引号折叠串与通配符片段）
+        (BLOCKED_SENSITIVE_PACKAGES.firstOrNull { pkg ->
+            containsPackageToken(trimmed, pkg) || containsPackageToken(collapsed, pkg)
+        } ?: findGlobMatchedSensitivePackage(collapsed))?.let { pkg ->
             return PolicyEvaluation(
                 PolicyDecision.DENY,
                 "安全红线拦截：禁止通过命令读取或操作受保护的金融/密码应用 ($pkg)"
             )
         }
 
-        if (ADB_PATH_REGEX.containsMatchIn(trimmed)) {
+        if (ADB_PATH_REGEX.containsMatchIn(trimmed) ||
+            ADB_PATH_REGEX.containsMatchIn(collapsed) ||
+            matchesPathGlob(collapsed, "/data/adb")
+        ) {
             return PolicyEvaluation(
                 PolicyDecision.DENY,
                 "安全红线拦截：禁止访问或修改 /data/adb（保护 Magisk / Zygisk / Sui 模块与提权配置）"
             )
         }
 
-        if (BLOCK_DEV_REGEX.containsMatchIn(trimmed)) {
+        if (BLOCK_DEV_REGEX.containsMatchIn(trimmed) ||
+            BLOCK_DEV_REGEX.containsMatchIn(collapsed) ||
+            matchesPathGlob(collapsed, "/dev/block")
+        ) {
             return PolicyEvaluation(
                 PolicyDecision.DENY,
                 "安全红线拦截：禁止直接操作分区块设备 (/dev/block)"
@@ -239,12 +255,13 @@ object ShellPolicyEngine {
         if (asRoot) {
             highestDecision = PolicyDecision.ASK
             askReason = "请求以 Root (UID 0) 身份执行"
+            allowSessionRemember = false
         }
 
         if (splitResult.hasExpansionOrSubshell) {
             highestDecision = maxOf(highestDecision, PolicyDecision.ASK)
             if (askReason.isEmpty()) {
-                askReason = "包含命令替换 ($() / 反引号) 或子 Shell，需人工确认"
+                askReason = "包含变量/命令替换 ($VAR / $() / 反引号) 或子 Shell，需人工确认"
             }
             allowSessionRemember = false
         }
@@ -324,14 +341,32 @@ object ShellPolicyEngine {
         var cmd = binaryBasename(tokens[idx])
         var args = tokens.subList(idx + 1, tokens.size)
 
-        // 解包 toybox / busybox 多合一二进制（防 /system/bin/toybox rm 绕过）
-        if (cmd == "toybox" || cmd == "busybox") {
-            val subIdx = args.indexOfFirst { !it.startsWith("-") }
-            if (subIdx == -1) {
-                return PolicyEvaluation(PolicyDecision.ALLOW, "$cmd 信息查询")
+        // 循环解包 env / toybox / busybox 多层包装（防 `toybox toybox reboot` 或 `env rm` 绕过）
+        while (cmd == "toybox" || cmd == "busybox" || cmd == "env") {
+            if (cmd == "env") {
+                var envIdx = 0
+                while (envIdx < args.size && (args[envIdx].startsWith("-") || isEnvAssignment(args[envIdx]))) {
+                    if (isEnvAssignment(args[envIdx])) {
+                        val key = args[envIdx].substringBefore('=')
+                        if (key in setOf("LD_PRELOAD", "LD_LIBRARY_PATH", "PATH", "CLASSPATH", "BOOTCLASSPATH")) {
+                            return PolicyEvaluation(PolicyDecision.ASK, "env 修改敏感运行环境变量需确认")
+                        }
+                    }
+                    envIdx++
+                }
+                if (envIdx >= args.size) {
+                    return PolicyEvaluation(PolicyDecision.ALLOW, "env 环境变量查询")
+                }
+                cmd = binaryBasename(args[envIdx])
+                args = args.subList(envIdx + 1, args.size)
+            } else {
+                val subIdx = args.indexOfFirst { !it.startsWith("-") }
+                if (subIdx == -1) {
+                    return PolicyEvaluation(PolicyDecision.ALLOW, "$cmd 信息查询")
+                }
+                cmd = binaryBasename(args[subIdx])
+                args = args.subList(subIdx + 1, args.size)
             }
-            cmd = binaryBasename(args[subIdx])
-            args = args.subList(subIdx + 1, args.size)
         }
 
         // ---- 第一层：DENY 规则 ----
@@ -352,7 +387,8 @@ object ShellPolicyEngine {
         }
 
         if (cmd == "dd" && args.any {
-                it.startsWith("of=/dev/") || it.startsWith("of=/system") || it.startsWith("of=/vendor")
+                it != "of=/dev/null" && it != "of=/dev/zero" &&
+                    (it.startsWith("of=/dev/") || it.startsWith("of=/system") || it.startsWith("of=/vendor"))
             }
         ) {
             return PolicyEvaluation(
@@ -808,13 +844,11 @@ object ShellPolicyEngine {
                 i++
                 continue
             }
-            if (inDouble && (c == '`' || (c == '$' && i + 1 < s.length && (s[i + 1] == '(' || s[i + 1] == '{')))) {
+            if (inDouble && (c == '`' || isDollarExpansion(s, i))) {
                 hasExpansion = true
             }
             if (!inSingle && !inDouble) {
-                if (c == '`' || c == '(' || c == ')' ||
-                    (c == '$' && i + 1 < s.length && (s[i + 1] == '(' || s[i + 1] == '{'))
-                ) {
+                if (c == '`' || c == '(' || c == ')' || isDollarExpansion(s, i)) {
                     hasExpansion = true
                 }
                 when {
@@ -951,6 +985,97 @@ object ShellPolicyEngine {
         }
         return i
     }
+
+    private fun isDollarExpansion(s: String, index: Int): Boolean {
+        if (s[index] != '$' || index + 1 >= s.length) return false
+        val next = s[index + 1]
+        return next == '(' || next == '{' || next.isLetterOrDigit() || next == '_' ||
+            next in setOf('@', '*', '#', '?', '$', '!', '-')
+    }
+
+    /** 剥离未转义的单双引号，还原 `/data/"adb"`、`com.x8bit.'bitwarden'` 等引号拼接字面量 */
+    private fun collapseQuotes(s: String): String {
+        val sb = StringBuilder(s.length)
+        var inSingle = false
+        var inDouble = false
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            when {
+                c == '\\' && !inSingle && i + 1 < s.length -> {
+                    sb.append(s[i + 1])
+                    i += 2
+                    continue
+                }
+                c == '\'' && !inDouble -> inSingle = !inSingle
+                c == '"' && !inSingle -> inDouble = !inDouble
+                else -> sb.append(c)
+            }
+            i++
+        }
+        return sb.toString()
+    }
+
+    private val GLOB_TOKEN_SPLIT = Regex("""[\s;|&()'"=:]+""")
+
+    private fun findGlobMatchedSensitivePackage(collapsed: String): String? {
+        if ('*' !in collapsed && '?' !in collapsed && '[' !in collapsed) return null
+        val tokens = collapsed.split(GLOB_TOKEN_SPLIT).filter { '*' in it || '?' in it || '[' in it }
+        for (token in tokens) {
+            // 将路径段拆开，避免单独一个 `*` 把正常 `ls *` 误判为匹配金融包名；要求至少包含包名特征前缀（含 `.` 且非纯通配符）
+            for (seg in token.split('/')) {
+                if ('.' !in seg) continue
+                val regex = globToRegex(seg) ?: continue
+                BLOCKED_SENSITIVE_PACKAGES.firstOrNull { regex.matches(it) }?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun matchesPathGlob(collapsed: String, protectedPrefix: String): Boolean {
+        if ('*' !in collapsed && '?' !in collapsed && '[' !in collapsed) return false
+        val tokens = collapsed.split(GLOB_TOKEN_SPLIT).filter { it.startsWith("/") && ('*' in it || '?' in it || '[' in it) }
+        val targetSegments = protectedPrefix.trim('/').split('/')
+        for (token in tokens) {
+            val segs = token.trim('/').split('/')
+            if (segs.size < targetSegments.size) continue
+            // 至少有一段固定路径字面量（如 `/data/*` 不应误伤 `/data/local/tmp`，但 `/data/ad*` 或 `/d*ta/adb` 必须拦截）
+            val nonTrivial = segs.take(targetSegments.size).all { it != "*" }
+            if (!nonTrivial) continue
+            val matched = targetSegments.indices.all { idx ->
+                globToRegex(segs[idx])?.matches(targetSegments[idx]) == true
+            }
+            if (matched) return true
+        }
+        return false
+    }
+
+    private fun globToRegex(glob: String): Regex? = runCatching {
+        val sb = StringBuilder("^")
+        var i = 0
+        while (i < glob.length) {
+            when (val c = glob[i]) {
+                '*' -> sb.append(".*")
+                '?' -> sb.append(".")
+                '[' -> {
+                    val close = glob.indexOf(']', i + 1)
+                    if (close > i) {
+                        sb.append(glob.substring(i, close + 1))
+                        i = close
+                    } else {
+                        sb.append("\\[")
+                    }
+                }
+                '.', '+', '(', ')', '^', '$', '{', '}', '|', '\\' -> {
+                    sb.append('\\').append(c)
+                }
+                else -> sb.append(c)
+            }
+            i++
+        }
+        sb.append("$")
+        Regex(sb.toString())
+    }.getOrNull()
 
     private fun binaryBasename(token: String): String =
         token.substringAfterLast('/').lowercase()

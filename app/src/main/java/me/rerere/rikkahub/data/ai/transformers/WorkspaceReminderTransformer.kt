@@ -37,7 +37,8 @@ class WorkspaceReminderTransformer(
         val workspace = workspaceRepository.getById(workspaceId) ?: return messages
         // 与 ChatToolFactory.createWorkspaceToolsIfReady 保持一致: 仅在 shell 就绪时注入
         if (workspace.shellStatus != WorkspaceShellStatus.READY.name) return messages
-        val layout = workspaceRepository.layout(workspaceId) ?: return messages
+        val hostAccess = !workspace.isSsh() && ctx.workspaceHostAccess
+        val layout = workspaceRepository.layout(workspaceId, hostAccess) ?: return messages
 
         val prompt = if (workspace.isSsh()) {
             val environment = remoteEnvironments.get(workspaceId, workspace.sshConfig) {
@@ -54,6 +55,7 @@ class WorkspaceReminderTransformer(
                 shell = workspaceRepository.shell(workspaceId),
                 distro = readDistroName(workspaceId),
                 cwd = ctx.workspaceCwd,
+                hostAccess = hostAccess,
             ) + buildAgentsPrompt(workspaceId, ctx.workspaceCwd)
         }
         return messages.withPrompt(prompt)
@@ -192,6 +194,7 @@ private fun buildWorkspacePrompt(
     shell: String,
     distro: String?,
     cwd: String? = null,
+    hostAccess: Boolean = false,
 ): String = buildString {
     appendLine("<workspace>")
     appendLine(
@@ -219,6 +222,9 @@ private fun buildWorkspacePrompt(
         "  - `workspace_shell_output` / `workspace_shell_kill`: read the output of, or stop, a command started with `run_in_background`."
     )
     appendLine(
+        "  - `workspace_export_file`: export a file from the workspace to the user's phone `Download/RikkaHub` folder (prompts the user for approval)."
+    )
+    appendLine(
         "- Start long-running commands such as dev servers, watchers or long builds with `run_in_background` instead of appending `&`: processes left running with `&` are killed when the shell call returns. When a background command finishes you are notified with its exit code and the last lines of its output, so do not poll it; keep working on anything that does not depend on it, or end your reply if there is nothing else to do."
     )
     appendLine(
@@ -233,12 +239,15 @@ private fun buildWorkspacePrompt(
     appendLine(
         "- Files the user uploaded are mounted at `/upload`. Treat `/upload` as READ-ONLY: read uploaded files from `/upload/<file-name>`, but never modify, overwrite, or delete anything there. If you need to change an uploaded file, copy it into `/workspace` first and edit the copy."
     )
-    if (workspace.hostBridgeEnabled()) {
+    appendLine(
+        "- When you need to deliver a build artifact or generated file to the user's phone, write it inside `/workspace` first and call `workspace_export_file` to export it to `Download/RikkaHub` with user approval."
+    )
+    if (hostAccess) {
         appendLine(
-            "- The device's shared external storage is mounted at `/sdcard` and `/storage/emulated/0` (with `/sdcard/Download/RikkaHub` pre-authorized for exporting build artifacts or files to the user). Deletion calls (`rm`, `unlink`, `os.remove`) on `/sdcard` are automatically intercepted and moved to `/sdcard/.Trash-RikkaHub` to prevent accidental data loss."
+            "- Read-Only Phone Storage (`/sdcard` and `/storage/emulated/0`): Mounted strictly READ-ONLY (`EROFS`) for this conversation. You may inspect, search, or copy files from `/sdcard` into `/workspace`, but any attempt to write, modify, rename, or delete files under `/sdcard` will fail with `Read-only file system`. Use `workspace_export_file` to export artifacts to `Download/RikkaHub`."
         )
         appendLine(
-            "- Android Host Bridge (`host-sh`): Inside `workspace_shell`, run `host-sh \"<android_readonly_cmd>\"` to execute read-only Android host commands (UID 2000 shell: `dumpsys`, `logcat -d`, `getprop`, `pm list/path/dump`, `settings get/list`, `screencap -p`, `uiautomator dump /proc/self/fd/1`) and pipe their raw output directly into Linux tools (`python3`, `jq`, `sqlite3`, `awk`, `grep`). State-changing or `root` host commands require interactive user approval and must be called via the `android_shell` tool instead of `host-sh`."
+            "- Read-Only Android Host Probe (`host-sh`): Inside `workspace_shell`, run `host-sh \"<readonly_android_query>\"` to execute a single read-only Android diagnostic command (UID 2000 shell: `getprop`, `dumpsys <service>`, `pm list/path/dump`, `settings get/list`, `logcat -d`, `wm size/density`, `ps`, `df`) and pipe its stdout into Linux tools (`python3`, `jq`, `awk`, `grep`). Shell operators (`|`, `;`, `>`, `$`) are not allowed inside the `host-sh` argument itself; always pipe and filter in the outer `workspace_shell`."
         )
     }
     if (!cwd.isNullOrBlank()) {
