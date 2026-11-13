@@ -540,7 +540,7 @@ class ChatDraftManager(
 }
 
 private fun List<UIMessagePart>.draftLocalFileUrls(): Set<String> = buildSet {
-    forEach { part ->
+    this@draftLocalFileUrls.forEach { part ->
         val url = when (part) {
             is UIMessagePart.Image -> part.url
             is UIMessagePart.Document -> part.url
