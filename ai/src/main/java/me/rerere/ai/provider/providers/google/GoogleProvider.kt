@@ -67,8 +67,11 @@ import me.rerere.ai.util.mergeCustomHeaders
 import me.rerere.ai.util.removeElements
 import me.rerere.ai.util.stringSafe
 import me.rerere.common.http.await
+import me.rerere.common.http.jsonArrayOrNull
+import me.rerere.common.http.jsonObjectOrNull
 import me.rerere.common.http.jsonPrimitiveOrNull
 import me.rerere.common.http.sse.newEventSource
+import me.rerere.common.http.stringOrNull
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -155,24 +158,39 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             if (response.isSuccessful) {
                 val body = response.body?.string() ?: error("empty body")
                 Log.d(TAG, "listModels: $body")
-                val bodyObject = json.parseToJsonElement(body).jsonObject
-                val models = bodyObject["models"]?.jsonArray ?: return@withContext emptyList()
+                val bodyObject = json.parseToJsonElement(body).jsonObjectOrNull ?: return@withContext emptyList()
+                val models = bodyObject["models"]?.jsonArrayOrNull ?: return@withContext emptyList()
 
                 models.mapNotNull {
-                    val modelObject = it.jsonObject
+                    val modelObject = it.jsonObjectOrNull ?: return@mapNotNull null
+                    val rawName = modelObject.stringOrNull("name")?.takeIf { name -> name.isNotBlank() }
+                        ?: return@mapNotNull null
+                    val modelId = rawName.substringAfter("/").ifBlank { return@mapNotNull null }
 
-                    // 忽略非chat/embedding模型
-                    val supportedGenerationMethods =
-                        modelObject["supportedGenerationMethods"]!!.jsonArray
-                            .map { method -> method.jsonPrimitive.content }
-                    if ("generateContent" !in supportedGenerationMethods && "embedContent" !in supportedGenerationMethods) {
+                    // 忽略非chat/embedding模型（若反代未返回 supportedGenerationMethods，默认按 chat 模型处理）
+                    val supportedGenerationMethods = modelObject["supportedGenerationMethods"]
+                        ?.jsonArrayOrNull
+                        ?.mapNotNull { method -> method.jsonPrimitiveOrNull?.contentOrNull }
+                    if (supportedGenerationMethods != null &&
+                        "generateContent" !in supportedGenerationMethods &&
+                        "embedContent" !in supportedGenerationMethods
+                    ) {
                         return@mapNotNull null
                     }
 
+                    val displayName = modelObject.stringOrNull("displayName")
+                        ?.takeIf { name -> name.isNotBlank() }
+                        ?: modelId
+                    val type = if (supportedGenerationMethods == null || "generateContent" in supportedGenerationMethods) {
+                        ModelType.CHAT
+                    } else {
+                        ModelType.EMBEDDING
+                    }
+
                     Model(
-                        modelId = modelObject["name"]!!.jsonPrimitive.content.substringAfter("/"),
-                        displayName = modelObject["displayName"]!!.jsonPrimitive.content,
-                        type = if ("generateContent" in supportedGenerationMethods) ModelType.CHAT else ModelType.EMBEDDING,
+                        modelId = modelId,
+                        displayName = displayName,
+                        type = type,
                     )
                 }
             } else {
