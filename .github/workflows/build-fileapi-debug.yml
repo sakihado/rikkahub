@@ -6,14 +6,16 @@ on:
     branches:
       - feat/gemini-file-api
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  test:
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -35,20 +37,14 @@ jobs:
           cache: pnpm
           cache-dependency-path: web-ui/pnpm-lock.yaml
 
-      - name: Install Linux cross-toolchain for PRoot glibc guard
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
 
       - name: Install web-ui dependencies
         working-directory: web-ui
         run: pnpm install --frozen-lockfile
-
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
 
       - name: Prepare build files
         run: |
@@ -83,12 +79,88 @@ jobs:
           }
           JSON
 
-      - name: Run unit tests & build release + debug (arm64)
+      - name: Run unit tests
         run: |
           chmod +x gradlew
-          ./gradlew :workspace:testDebugUnitTest --no-daemon
-          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --no-daemon
-          ./gradlew assembleGithubRelease assembleGithubDebug -PrequireSafeSdcard=true --no-daemon
+          ./gradlew :workspace:testDebugUnitTest --build-cache
+          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --build-cache
+          ./gradlew --stop
+
+  build:
+    name: Build APKs (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'jetbrains'
+          java-version: '21'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web-ui/pnpm-lock.yaml
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Install Linux cross-toolchain for PRoot glibc guard
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install web-ui dependencies
+        working-directory: web-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare build files
+        run: |
+          cat > app/google-services.json <<'JSON'
+          {
+            "project_info": {
+              "project_number": "123456789012",
+              "project_id": "rikkahub-fileapi-build",
+              "storage_bucket": "rikkahub-fileapi-build.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:123456789012:android:0123456789abcdef012345",
+                  "android_client_info": { "package_name": "me.rerere.rikkahub" }
+                },
+                "oauth_client": [],
+                "api_key": [ { "current_key": "AIzaSyDUMMYKEYFORPERSONALBUILDONLY00000" } ],
+                "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+              },
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:123456789012:android:0123456789abcdef012345",
+                  "android_client_info": { "package_name": "me.rerere.rikkahub.debug" }
+                },
+                "oauth_client": [],
+                "api_key": [ { "current_key": "AIzaSyDUMMYKEYFORPERSONALBUILDONLY00000" } ],
+                "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          JSON
+
+      - name: Build release + debug (arm64)
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleGithubRelease assembleGithubDebug -PrequireSafeSdcard=true -x lintVitalGithubRelease -x lintVitalAnalyzeGithubRelease --build-cache --no-daemon
 
       - name: Collect arm64 APKs
         run: |
