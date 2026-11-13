@@ -7,8 +7,8 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.limitContext
 import me.rerere.ai.ui.toMetadata
-import me.rerere.ai.util.MIN_TRIMMABLE_TOOL_OUTPUT_BYTES
 import me.rerere.ai.util.AutoTrimPlan
+import me.rerere.ai.util.MIN_TRIMMABLE_TOOL_OUTPUT_BYTES
 import me.rerere.ai.util.canTrimClientTool
 import me.rerere.ai.util.canTrimServerTool
 import me.rerere.ai.util.estimateServerToolBytes

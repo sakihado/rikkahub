@@ -9,6 +9,7 @@ import me.rerere.ai.util.inspectHistoryTrim
 import me.rerere.ai.util.isHistoryTrimmed
 import me.rerere.ai.util.planAutoTrim
 import me.rerere.rikkahub.data.model.applyAutoTrim
+import me.rerere.rikkahub.data.model.trimHistoryOutputs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -74,7 +75,7 @@ class AutoHistoryTrimTest {
         assertFalse(tools[3].isHistoryTrimmed())
         assertFalse(tools[4].isHistoryTrimmed())
         // 本地原始输出保留，界面预览与引用不受影响
-        assertEquals(4096, (tools[0].output.single() as UIMessagePart.Text).text.length)
+        assertEquals(4096L, (tools[0].output.single() as UIMessagePart.Text).text.length.toLong())
     }
 
     @Test
