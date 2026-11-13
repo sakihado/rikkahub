@@ -3,19 +3,15 @@ package me.rerere.rikkahub.service
 import android.util.Log
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 import me.rerere.ai.ui.UIMessagePart
-import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.utils.JsonInstant
 import java.io.File
 import java.net.URI
@@ -83,7 +79,7 @@ data class ChatDraft(
             editingParts == other.editingParts
 
     fun localAttachmentUrls(): Set<String> =
-        (attachments + editingParts.orEmpty()).localFileUrls()
+        (attachments + editingParts.orEmpty()).draftLocalFileUrls()
 }
 
 @Serializable
@@ -119,32 +115,18 @@ class ChatDraftManager(
     )
 
     private val lock = Any()
+    private val saveJobLock = Any()
     private val diskWriteLock = Any()
     private var loaded = false
+    private var saveJob: Job? = null
     private val drafts = LinkedHashMap<DraftKey, ChatDraft>()
     private val activeOwners = HashMap<DraftKey, ActiveOwner>()
 
     @Volatile
     private var orphanAttachmentHandler: ((Set<String>) -> Unit)? = null
 
-    private val saveRequests = MutableSharedFlow<Unit>(
-        replay = 0,
-        extraBufferCapacity = 1,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-
     init {
         require(maxDrafts >= 1) { "maxDrafts must be >= 1" }
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            @OptIn(FlowPreview::class)
-            saveRequests
-                .debounce(saveDebounceMs)
-                .collect {
-                    withContext(ioDispatcher) {
-                        flushToDisk()
-                    }
-                }
-        }
     }
 
     fun setOrphanAttachmentHandler(handler: (Set<String>) -> Unit) {
@@ -432,7 +414,17 @@ class ChatDraftManager(
     }
 
     private fun requestSave() {
-        saveRequests.tryEmit(Unit)
+        synchronized(saveJobLock) {
+            saveJob?.cancel()
+            saveJob = scope.launch {
+                if (saveDebounceMs > 0) {
+                    delay(saveDebounceMs)
+                }
+                withContext(ioDispatcher) {
+                    flushToDisk()
+                }
+            }
+        }
     }
 
     private fun notifyOrphanAttachments(urls: Set<String>) {
@@ -544,6 +536,24 @@ class ChatDraftManager(
                 .getOrNull()
                 ?.let(::addAll)
         }
+    }
+}
+
+private fun List<UIMessagePart>.draftLocalFileUrls(): Set<String> = buildSet {
+    forEach { part ->
+        val url = when (part) {
+            is UIMessagePart.Image -> part.url
+            is UIMessagePart.Document -> part.url
+            is UIMessagePart.Video -> part.url
+            is UIMessagePart.Audio -> part.url
+            is UIMessagePart.Tool -> {
+                addAll(part.output.draftLocalFileUrls())
+                null
+            }
+
+            else -> null
+        }
+        if (url?.startsWith("file:") == true) add(url)
     }
 }
 
