@@ -30,15 +30,6 @@ internal fun List<UIMessage>.selectTrimHistoryCandidates(
     .dropLast(keepRecentMessages.coerceAtLeast(0))
     .filterNot { it.isContextCheckpoint }
 
-/** 该消息中是否还有尚未裁剪的工具/服务端搜索步骤（只做结构判断，不估算体积，用于决定是否显示入口） */
-fun UIMessage.hasUntrimmedHistory(): Boolean = parts.any { part ->
-    when (part) {
-        is UIMessagePart.Tool -> part.canTrimClientTool() && !part.isHistoryTrimmed()
-        is UIMessagePart.ServerTool -> part.canTrimServerTool() && !part.isHistoryTrimmed()
-        else -> false
-    }
-}
-
 /** 该消息中是否包含尚未裁剪、且达到最小体积门槛的工具或服务端搜索输出 */
 suspend fun UIMessage.hasTrimmableHistory(provider: ProviderSetting?): Boolean {
     for (part in parts) {

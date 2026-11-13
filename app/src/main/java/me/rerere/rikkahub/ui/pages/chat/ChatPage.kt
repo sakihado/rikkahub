@@ -68,7 +68,6 @@ import kotlinx.coroutines.launch
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessagePart
-import me.rerere.ai.ui.limitContext
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.LeftToRightListBullet
@@ -83,7 +82,6 @@ import me.rerere.rikkahub.data.datastore.getSelectedASRProvider
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
-import me.rerere.rikkahub.data.model.hasUntrimmedHistory
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
 import me.rerere.rikkahub.service.BackgroundShellStatus
 import me.rerere.rikkahub.service.ChatError
@@ -94,7 +92,6 @@ import me.rerere.rikkahub.ui.components.ai.ChatInput
 import me.rerere.rikkahub.ui.components.ai.ChatTopBarCapsule
 import me.rerere.rikkahub.ui.components.ai.FilesPicker
 import me.rerere.rikkahub.ui.components.ai.SearchMode
-import me.rerere.rikkahub.ui.components.ai.TrimHistoryDialog
 import me.rerere.rikkahub.ui.components.ai.completion.WorkspaceCompletionProvider
 import me.rerere.rikkahub.ui.components.ai.rememberChatAttachmentPickerActions
 import me.rerere.rikkahub.ui.context.LocalNavController
@@ -315,7 +312,6 @@ private fun ChatPageContent(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val hazeState = rememberHazeState()
     var showFilesSheet by remember { mutableStateOf(false) }
-    var showTrimHistoryDialog by remember { mutableStateOf(false) }
     val attachmentPickerActions = rememberChatAttachmentPickerActions(
         inputState = inputState,
         setting = setting,
@@ -323,12 +319,6 @@ private fun ChatPageContent(
     )
     val allowAudioVideoAttachments =
         currentChatModel?.findProvider(setting.providers) is ProviderSetting.Google
-
-    // 「裁剪历史」入口只在当前上下文窗口里还有未裁剪的工具/搜索步骤时出现；
-    // 只做结构判断、不估算体积，可以随消息更新在组合中同步计算
-    val trimHistoryWindow = conversation.currentMessages.limitContext(assistant.contextMessageLimit)
-    val trimHistoryAvailable = trimHistoryWindow.any { it.hasUntrimmedHistory() }
-    val trimHistoryProvider = currentChatModel?.findProvider(setting.providers)
 
     val completionProviders = remember(assistant.workspaceId, conversation.workspaceCwd, workspaceRepository) {
         assistant.workspaceId?.let { workspaceId ->
@@ -466,8 +456,6 @@ private fun ChatPageContent(
                     onMoreClick = {
                         showFilesSheet = true
                     },
-                    trimHistoryAvailable = trimHistoryAvailable,
-                    onTrimHistoryClick = { showTrimHistoryDialog = true },
                 )
             },
             containerColor = Color.Transparent,
@@ -577,15 +565,6 @@ private fun ChatPageContent(
                 onDismiss = { showFilesSheet = false },
             )
         }
-
-        if (showTrimHistoryDialog) {
-            TrimHistoryDialog(
-                messages = trimHistoryWindow,
-                provider = trimHistoryProvider,
-                onDismiss = { showTrimHistoryDialog = false },
-                onConfirm = vm::handleTrimHistory,
-            )
-        }
     }
 }
 
@@ -627,6 +606,7 @@ private fun ChatFilesPickerSheet(
             mcpManager = vm.mcpManager,
             onCompressContext = vm::handleCompressContext,
             onCompactAttachments = vm::handleCompactAttachments,
+            onTrimHistory = vm::handleTrimHistory,
             onUpdateAssistant = vm::updateAssistant,
             onUpdateWorkspaceCwd = vm::updateWorkspaceCwd,
             onUpdateWorkspaceHostAccess = vm::updateWorkspaceHostAccess,

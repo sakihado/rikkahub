@@ -58,13 +58,16 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.limitContext
 import me.rerere.ai.util.AttachmentSize
+import me.rerere.ai.util.HistoryTrimStats
 import me.rerere.ai.util.RequestSizeEstimate
 import me.rerere.ai.util.estimateRequestBytes
+import me.rerere.ai.util.inspectHistoryTrim
 import me.rerere.ai.util.listAttachments
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.ArrowLeft01
 import me.rerere.hugeicons.stroke.ArrowRight01
 import me.rerere.hugeicons.stroke.Camera01
+import me.rerere.hugeicons.stroke.Clean
 import me.rerere.hugeicons.stroke.Codesandbox
 import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.hugeicons.stroke.Files02
@@ -122,6 +125,7 @@ internal fun FilesPicker(
     mcpManager: McpManager,
     onCompressContext: (additionalPrompt: String, keepRecentMessages: Int) -> Job,
     onCompactAttachments: (keepRecentMessages: Int) -> Job,
+    onTrimHistory: (keepRecentMessages: Int) -> Job,
     onUpdateAssistant: (Assistant) -> Unit,
     onUpdateWorkspaceCwd: (String?) -> Unit,
     onUpdateWorkspaceHostAccess: (Boolean) -> Unit,
@@ -153,8 +157,9 @@ internal fun FilesPicker(
         boundWorkspace.shellStatus == WorkspaceShellStatus.READY.name
     var showCwdSheet by remember { mutableStateOf(false) }
     var showCompactAttachmentsDialog by remember { mutableStateOf(false) }
+    var showTrimHistoryDialog by remember { mutableStateOf(false) }
 
-    // 请求体积与附件清单：要读磁盘文件长度和遍历大文本，放到 IO 线程算，避免展开面板时掉帧
+    // 请求体积与附件/工具输出清单：要读磁盘文件长度和遍历大文本，放到 IO 线程算，避免展开面板时掉帧
     val attachmentStats by produceState(
         initialValue = RequestAttachmentStats.Empty,
         conversation.messageNodes,
@@ -166,6 +171,8 @@ internal fun FilesPicker(
             RequestAttachmentStats(
                 estimate = messages.estimateRequestBytes(provider),
                 attachments = messages.listAttachments(provider),
+                trimStats = messages.inspectHistoryTrim(provider),
+                windowMessageCount = messages.size,
             )
         }
     }
@@ -255,7 +262,7 @@ internal fun FilesPicker(
                 // 限制了上下文消息数就是滚动上下文，旧消息会自动移出，不需要压缩
                 val showCompress = assistant.contextMessageLimit <= 0
                 // 压缩附件、裁剪历史和滚动上下文无关：窗口内的附件或大工具输出一样可能撑爆上下文与体积
-                val itemCount = 3 + listOf(
+                val itemCount = 4 + listOf(
                     showWorkspace,
                     showWorkspace && showCwd,
                     showWorkspace && showHostAccess,
@@ -481,6 +488,43 @@ internal fun FilesPicker(
                     ) {
                         Text(stringResource(R.string.chat_compact_attachments))
                     }
+
+                    // 裁剪历史：折叠较早的工具大输出与联网搜索原文，保留正文与工具骨架
+                    SegmentedListItem(
+                        onClick = { showTrimHistoryDialog = true },
+                        shapes = ListItemDefaults.segmentedShapes(index = itemIndex++, count = itemCount),
+                        leadingContent = {
+                            Icon(
+                                imageVector = HugeIcons.Clean,
+                                contentDescription = null,
+                            )
+                        },
+                        trailingContent = {
+                            val trimStats = attachmentStats.trimStats
+                            if (trimStats != null) {
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(
+                                        text = trimStats.activeBytes.formatBytes(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    if (trimStats.totalCount > 0) {
+                                        Text(
+                                            text = stringResource(
+                                                R.string.chat_trim_history_count,
+                                                trimStats.totalCount,
+                                                trimStats.trimmedCount,
+                                            ),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                    ) {
+                        Text(stringResource(R.string.chat_trim_history))
+                    }
                 }
             }
         }
@@ -515,15 +559,26 @@ internal fun FilesPicker(
             onConfirm = onCompactAttachments,
         )
     }
+
+    if (showTrimHistoryDialog) {
+        TrimHistoryDialog(
+            stats = attachmentStats.trimStats ?: HistoryTrimStats.Empty,
+            totalMessages = attachmentStats.windowMessageCount,
+            onDismiss = { showTrimHistoryDialog = false },
+            onConfirm = onTrimHistory,
+        )
+    }
 }
 
-/** 底部菜单里展示的请求体积与附件清单 */
+/** 底部菜单里展示的请求体积、附件清单与工具输出统计 */
 private data class RequestAttachmentStats(
     val estimate: RequestSizeEstimate?,
     val attachments: List<AttachmentSize>,
+    val trimStats: HistoryTrimStats?,
+    val windowMessageCount: Int,
 ) {
     companion object {
-        val Empty = RequestAttachmentStats(null, emptyList())
+        val Empty = RequestAttachmentStats(null, emptyList(), null, 0)
     }
 }
 
