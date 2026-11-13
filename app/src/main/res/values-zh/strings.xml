@@ -982,6 +982,15 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="chat_attachment_restored">已恢复，将重新计入请求体积</string>
   <string name="chat_attachment_request_too_large">本次请求约 %1$s，超过该模型 %2$d MB 上限，请先在「压缩附件」中省略较早的附件。</string>
   <string name="error_title_compact_attachments">压缩附件</string>
+  <string name="chat_trim_history">裁剪历史</string>
+  <string name="chat_trim_history_count">%1$d 步工具输出 · %2$d 步已裁剪</string>
+  <string name="chat_trim_history_preview">将裁剪 %1$d 步工具与搜索输出，释放约 %2$s</string>
+  <string name="chat_trim_history_nothing">当前上下文没有可裁剪的工具或搜索输出</string>
+  <string name="chat_trim_history_blocked_generating">请先停止生成再裁剪历史</string>
+  <string name="chat_trim_history_desc">将较早的工具输出（文件读取、终端结果、网页搜索与抓取等）替换为一行占位说明，完整保留对话正文与操作记录。本地原始输出不受影响，点击步骤右侧「已裁剪」可单项恢复。</string>
+  <string name="chat_trim_history_confirm">裁剪</string>
+  <string name="chat_history_trimmed_badge">已裁剪</string>
+  <string name="error_title_trim_history">裁剪历史</string>
   <string name="setting_provider_page_use_service_account">使用服务账号</string>
   <string name="setting_provider_page_vertex_ai">Vertex AI</string>
   <string name="setting_tts_page_add">添加</string>

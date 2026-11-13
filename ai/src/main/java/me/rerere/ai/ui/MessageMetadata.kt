@@ -137,6 +137,18 @@ data class AttachmentBudgetMetadata(
 ) : PartMetadata
 
 /**
+ * 历史工具输出裁剪：该工具或服务端搜索部件已被「裁剪历史」标记，请求时替换成简短占位文本。
+ *
+ * 原始输出仍然保留在本地会话中，界面渲染、搜索引用与详情预览不受影响，可随时单项恢复。
+ */
+@Serializable
+data class HistoryTrimMetadata(
+    val trimmed: Boolean? = null,
+    @SerialName("trimmed_bytes")
+    val trimmedBytes: Long? = null,
+) : PartMetadata
+
+/**
  * 文件编辑类工具(如 workspace_edit_file)输出部件的元数据,
  * 携带 unified diff 文本供 UI 渲染 diff view, 不会发送给 API
  */

@@ -97,6 +97,7 @@ fun ChatList(
     onDelete: (UIMessage) -> Unit = {},
     onUpdateMessage: (MessageNode) -> Unit = {},
     onRestoreAttachment: ((Uuid, Int) -> Unit)? = null,
+    onRestoreTrimmedTool: ((Uuid, String) -> Unit)? = null,
     onClickSuggestion: (String) -> Unit = {},
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)? = null,
     onClearTranslation: (UIMessage) -> Unit = {},
@@ -158,6 +159,7 @@ fun ChatList(
                 onDelete = onDelete,
                 onUpdateMessage = onUpdateMessage,
                 onRestoreAttachment = onRestoreAttachment,
+                onRestoreTrimmedTool = onRestoreTrimmedTool,
                 onClickSuggestion = onClickSuggestion,
                 onTranslate = onTranslate,
                 onClearTranslation = onClearTranslation,
@@ -231,6 +233,7 @@ private fun ChatListNormal(
     onDelete: (UIMessage) -> Unit,
     onUpdateMessage: (MessageNode) -> Unit,
     onRestoreAttachment: ((Uuid, Int) -> Unit)?,
+    onRestoreTrimmedTool: ((Uuid, String) -> Unit)?,
     onClickSuggestion: (String) -> Unit,
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)?,
     onClearTranslation: (UIMessage) -> Unit,
@@ -392,6 +395,9 @@ private fun ChatListNormal(
                             },
                             onRestoreAttachment = onRestoreAttachment?.let { callback ->
                                 { partIndex -> callback(node.currentMessage.id, partIndex) }
+                            },
+                            onRestoreTrimmedTool = onRestoreTrimmedTool?.let { callback ->
+                                { toolCallId -> callback(node.currentMessage.id, toolCallId) }
                             },
                             isFavorite = node.isFavorite,
                             onToggleFavorite = {

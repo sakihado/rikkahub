@@ -119,6 +119,7 @@ fun ChatMessage(
     onDelete: () -> Unit,
     onUpdate: (MessageNode) -> Unit,
     onRestoreAttachment: ((partIndex: Int) -> Unit)? = null,
+    onRestoreTrimmedTool: ((toolCallId: String) -> Unit)? = null,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
     onTranslate: ((UIMessage, Locale) -> Unit)? = null,
@@ -201,6 +202,7 @@ fun ChatMessage(
                 onToolAnswer = onToolAnswer,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
                 onRestoreAttachment = onRestoreAttachment,
+                onRestoreTrimmedTool = onRestoreTrimmedTool,
             )
 
             message.translation?.let { translation ->
@@ -312,6 +314,7 @@ private fun MessagePartsBlock(
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
     onRestoreAttachment: ((partIndex: Int) -> Unit)? = null,
+    onRestoreTrimmedTool: ((toolCallId: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     // 消息输出HapticFeedback
@@ -392,13 +395,21 @@ private fun MessagePartsBlock(
                                         assistant = assistant,
                                         onToolApproval = onToolApproval,
                                         onToolAnswer = onToolAnswer,
+                                        onRestoreTrimmed = onRestoreTrimmedTool?.let { callback ->
+                                            { callback(step.tool.toolCallId) }
+                                        },
                                     )
                                 }
                             }
 
                             is ThinkingStep.ServerToolStep -> {
                                 key(step.tool.toolCallId.ifBlank { step.hashCode().toString() }) {
-                                    ChatMessageServerToolStep(tool = step.tool)
+                                    ChatMessageServerToolStep(
+                                        tool = step.tool,
+                                        onRestoreTrimmed = onRestoreTrimmedTool?.let { callback ->
+                                            { callback(step.tool.toolCallId) }
+                                        },
+                                    )
                                 }
                             }
 

@@ -74,9 +74,21 @@ suspend fun List<UIMessage>.estimateRequestBytes(
                 }
 
                 is UIMessagePart.Tool -> {
-                    // 工具调用的入参与输出都会被回传
+                    // 工具调用的入参与输出都会被回传；若输出已被「裁剪历史」标记，按占位文本计
                     bytes += part.input.toByteArray().size.toLong()
-                    walk(part.output)
+                    if (part.isHistoryTrimmed() && part.canTrimClientTool()) {
+                        bytes += part.trimmedPlaceholderBytes()
+                    } else {
+                        walk(part.output)
+                    }
+                }
+
+                is UIMessagePart.ServerTool -> {
+                    bytes += if (part.isHistoryTrimmed() && part.canTrimServerTool()) {
+                        part.trimmedPlaceholderBytes()
+                    } else {
+                        part.estimateServerToolBytes()
+                    }
                 }
 
                 else -> Unit

@@ -1007,6 +1007,15 @@
   <string name="chat_attachment_restored">Restored, it counts toward the request size again</string>
   <string name="chat_attachment_request_too_large">This request is about %1$s, above the %2$d MB limit. Compact older attachments first.</string>
   <string name="error_title_compact_attachments">Compact attachments</string>
+  <string name="chat_trim_history">Trim history</string>
+  <string name="chat_trim_history_count">%1$d tool outputs · %2$d trimmed</string>
+  <string name="chat_trim_history_preview">Will trim %1$d tool and search outputs, freeing about %2$s</string>
+  <string name="chat_trim_history_nothing">No tool or search outputs to trim in the current context</string>
+  <string name="chat_trim_history_blocked_generating">Stop generating before trimming history</string>
+  <string name="chat_trim_history_desc">Replaces older large tool outputs (file reads, terminal output, web search and scrapes) with a compact placeholder while keeping all conversation messages and tool call records intact. Original outputs remain locally viewable and can be restored per step.</string>
+  <string name="chat_trim_history_confirm">Trim</string>
+  <string name="chat_history_trimmed_badge">Trimmed</string>
+  <string name="error_title_trim_history">Trim history</string>
   <string name="setting_provider_page_service_account_email">Service Account Email</string>
   <string name="setting_provider_page_test">Test</string>
   <string name="setting_provider_page_test_connection">Test Connection</string>

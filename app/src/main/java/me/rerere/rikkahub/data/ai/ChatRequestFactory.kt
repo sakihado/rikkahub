@@ -28,6 +28,7 @@ import me.rerere.rikkahub.data.ai.tools.ChatToolFactory
 import me.rerere.rikkahub.data.ai.transformers.AttachmentOmitTransformer
 import me.rerere.rikkahub.data.ai.transformers.Base64ImageToLocalFileTransformer
 import me.rerere.rikkahub.data.ai.transformers.DocumentAsPromptTransformer
+import me.rerere.rikkahub.data.ai.transformers.HistoryTrimTransformer
 import me.rerere.rikkahub.data.ai.transformers.InputMessageTransformer
 import me.rerere.rikkahub.data.ai.transformers.OcrTransformer
 import me.rerere.rikkahub.data.ai.transformers.OutputMessageTransformer
@@ -87,7 +88,8 @@ class ChatRequestFactory(
     workspaceRepository: WorkspaceRepository,
 ) {
     private val inputTransformers: List<InputMessageTransformer> = listOf(
-        // 已省略的附件必须在文档解析 / OCR 之前换成占位文本，否则仍会被解析和识别
+        // 已裁剪的工具输出与已省略的附件必须在文档解析 / OCR 之前换成占位文本，否则仍会被解析和识别
+        HistoryTrimTransformer,
         AttachmentOmitTransformer,
         TimeReminderTransformer,
         PromptInjectionTransformer,

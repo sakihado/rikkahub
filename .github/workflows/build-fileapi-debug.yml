@@ -83,7 +83,7 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :workspace:testDebugUnitTest --build-cache
-          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --build-cache
+          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --tests "me.rerere.rikkahub.data.ai.transformers.HistoryTrimTransformerTest" --build-cache
           ./gradlew --stop
 
   build:

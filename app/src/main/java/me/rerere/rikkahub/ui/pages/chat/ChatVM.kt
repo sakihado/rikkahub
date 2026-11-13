@@ -283,6 +283,22 @@ class ChatVM(
         }
     }
 
+    fun handleTrimHistory(keepRecentMessages: Int): Job {
+        return viewModelScope.launch {
+            chatService.trimHistory(_conversationId, keepRecentMessages).onFailure {
+                chatService.addError(it, title = context.getString(R.string.error_title_trim_history))
+            }
+        }
+    }
+
+    fun restoreTrimmedTool(messageId: Uuid, toolCallId: String) {
+        viewModelScope.launch {
+            chatService.restoreTrimmedTool(_conversationId, messageId, toolCallId).onFailure {
+                chatService.addError(it, title = context.getString(R.string.error_title_trim_history))
+            }
+        }
+    }
+
     suspend fun forkMessage(message: UIMessage): Conversation {
         return chatService.forkConversationAtMessage(_conversationId, message.id)
     }

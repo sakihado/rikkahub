@@ -500,6 +500,9 @@ private fun ChatPageContent(
                 onRestoreAttachment = { messageId, partIndex ->
                     vm.restoreAttachment(messageId, partIndex)
                 },
+                onRestoreTrimmedTool = { messageId, toolCallId ->
+                    vm.restoreTrimmedTool(messageId, toolCallId)
+                },
                 onClickSuggestion = { suggestion ->
                     inputState.editingMessage = null
                     inputState.setMessageText(suggestion)
@@ -601,6 +604,7 @@ private fun ChatFilesPickerSheet(
             mcpManager = vm.mcpManager,
             onCompressContext = vm::handleCompressContext,
             onCompactAttachments = vm::handleCompactAttachments,
+            onTrimHistory = vm::handleTrimHistory,
             onUpdateAssistant = vm::updateAssistant,
             onUpdateWorkspaceCwd = vm::updateWorkspaceCwd,
             onUpdateSearchMode = { mode ->

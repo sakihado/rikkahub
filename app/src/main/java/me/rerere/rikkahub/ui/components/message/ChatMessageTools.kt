@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.ui.components.message
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -34,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,6 +52,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.util.isHistoryTrimmed
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.BubbleChatQuestion
 import me.rerere.hugeicons.stroke.Cancel01
@@ -71,8 +76,12 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.DurationUnit
 
 @Composable
-fun ChainOfThoughtScope.ChatMessageServerToolStep(tool: UIMessagePart.ServerTool) {
+fun ChainOfThoughtScope.ChatMessageServerToolStep(
+    tool: UIMessagePart.ServerTool,
+    onRestoreTrimmed: (() -> Unit)? = null,
+) {
     val loading = !tool.isFinished
+    val trimmed = tool.isHistoryTrimmed()
     ChainOfThoughtStep(
         icon = {
             if (loading) {
@@ -95,6 +104,11 @@ fun ChainOfThoughtScope.ChatMessageServerToolStep(tool: UIMessagePart.ServerTool
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+        },
+        extra = if (trimmed) {
+            { TrimmedHistoryBadge(onClick = onRestoreTrimmed) }
+        } else {
+            null
         },
     )
 }
@@ -137,6 +151,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     assistant: Assistant? = null,
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onRestoreTrimmed: (() -> Unit)? = null,
 ) {
     // ask_user 是交互式问答流程, 不走注册式渲染框架
     if (tool.toolName == ASK_USER_TOOL_NAME) {
@@ -173,8 +188,10 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     var expanded by remember { mutableStateOf(true) }
     val isPending = tool.isPending
     val isDenied = tool.approvalState is ToolApprovalState.Denied
+    val isTrimmed = tool.isHistoryTrimmed()
     val images = tool.output.filterIsInstance<UIMessagePart.Image>()
     val duration = rememberToolDuration(tool, loading)
+    val showDuration = duration != null && duration >= 100.milliseconds
 
     // 摘要由注册的渲染器决定; 图片输出与拒绝原因为所有工具通用
     val hasExtraContent = renderer.hasSummary(context) || isDenied || images.isNotEmpty()
@@ -233,14 +250,24 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                     }
                 }
             }
-        } else if (duration != null && duration >= 100.milliseconds) {
+        } else if (isTrimmed || showDuration) {
             {
-                Text(
-                    text = duration.toString(DurationUnit.SECONDS, 1),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.shimmer(isLoading = loading),
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (isTrimmed) {
+                        TrimmedHistoryBadge(onClick = onRestoreTrimmed)
+                    }
+                    if (showDuration) {
+                        Text(
+                            text = duration.toString(DurationUnit.SECONDS, 1),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.shimmer(isLoading = loading),
+                        )
+                    }
+                }
             }
         } else {
             null
@@ -558,5 +585,19 @@ private fun ToolDenyReasonDialog(
                 Text(stringResource(android.R.string.cancel))
             }
         }
+    )
+}
+
+@Composable
+private fun TrimmedHistoryBadge(onClick: (() -> Unit)?) {
+    Text(
+        text = stringResource(R.string.chat_history_trimmed_badge),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
     )
 }

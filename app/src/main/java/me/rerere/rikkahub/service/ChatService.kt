@@ -68,6 +68,7 @@ import me.rerere.rikkahub.data.model.getAssistantOf
 import me.rerere.rikkahub.data.model.getChatModelOf
 import me.rerere.rikkahub.data.model.getStoredAssistantOf
 import me.rerere.rikkahub.data.model.hasRestorableAttachments
+import me.rerere.rikkahub.data.model.hasTrimmableHistory
 import me.rerere.rikkahub.data.model.insertContextCheckpoint
 import me.rerere.rikkahub.data.model.isAwaitingToolApproval
 import me.rerere.rikkahub.data.model.lastContextTokens
@@ -75,8 +76,11 @@ import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.data.model.omitAttachments
 import me.rerere.rikkahub.data.model.replaceUserRegexes
 import me.rerere.rikkahub.data.model.restoreAttachment
+import me.rerere.rikkahub.data.model.restoreTrimmedHistory
 import me.rerere.rikkahub.data.model.selectBranch
+import me.rerere.rikkahub.data.model.selectTrimHistoryCandidates
 import me.rerere.rikkahub.data.model.toMessageNode
+import me.rerere.rikkahub.data.model.trimHistoryOutputs
 import me.rerere.rikkahub.data.model.updateMessageById
 import me.rerere.rikkahub.data.model.withAssistantUpdate
 import me.rerere.rikkahub.data.model.withNodeFavorite
@@ -1044,6 +1048,82 @@ class ChatService(
                     message.copy(
                         parts = message.parts.mapIndexed { index, part ->
                             if (index == partIndex) part.restoreAttachment() else part
+                        }
+                    )
+                }
+            }
+            session.flush()
+        }
+    }
+
+    /**
+     * 裁剪历史：把较早消息中大体积的工具调用输出（文件读取、终端输出、网页搜索/抓取等）及服务端搜索结果标记为已裁剪。
+     *
+     * 请求时这些输出会被替换成一行简短占位文本，保留消息正文、推理签名与工具入参骨架；
+     * 本地会话里的原始工具输出保持不变，界面渲染、搜索引用角标与工具详情预览不受影响。
+     */
+    suspend fun trimHistory(
+        conversationId: Uuid,
+        keepRecentMessages: Int = 4,
+    ): Result<Unit> = runCatching {
+        withLoadedSession<Unit>(conversationId) { session ->
+            check(!session.isGenerating) {
+                context.getString(R.string.chat_trim_history_blocked_generating)
+            }
+
+            val settings = settingsStore.awaitLoaded()
+            val conversation = session.state.value
+            val assistant = settings.getAssistantOf(conversation)
+            val provider = settings.getChatModelOf(conversation)?.findProvider(settings.providers)
+            val candidates = conversation.currentMessages.selectTrimHistoryCandidates(
+                contextMessageLimit = assistant.contextMessageLimit,
+                keepRecentMessages = keepRecentMessages,
+            )
+
+            val replacements = mutableMapOf<Uuid, UIMessage>()
+            for (message in candidates) {
+                if (!message.hasTrimmableHistory(provider)) continue
+                val updated = message.trimHistoryOutputs(provider)
+                if (updated != message) replacements[message.id] = updated
+            }
+
+            if (replacements.isEmpty()) {
+                throw IllegalStateException(
+                    context.getString(R.string.chat_trim_history_nothing)
+                )
+            }
+
+            session.update { latest ->
+                latest.copy(
+                    messageNodes = latest.messageNodes.map { node ->
+                        val replaced = node.messages.map { message ->
+                            replacements[message.id] ?: message
+                        }
+                        if (replaced == node.messages) node else node.copy(messages = replaced)
+                    }
+                )
+            }
+            session.flush()
+        }
+    }
+
+    /** 恢复某个被「裁剪历史」标记过的工具调用/搜索结果，让完整输出重新参与请求 */
+    suspend fun restoreTrimmedTool(
+        conversationId: Uuid,
+        messageId: Uuid,
+        toolCallId: String,
+    ): Result<Unit> = runCatching {
+        withLoadedSession<Unit>(conversationId) { session ->
+            session.update { latest ->
+                latest.updateMessageById(messageId) { message ->
+                    message.copy(
+                        parts = message.parts.map { part ->
+                            val matches = when (part) {
+                                is UIMessagePart.Tool -> part.toolCallId == toolCallId
+                                is UIMessagePart.ServerTool -> part.toolCallId == toolCallId
+                                else -> false
+                            }
+                            if (matches) part.restoreTrimmedHistory() else part
                         }
                     )
                 }
