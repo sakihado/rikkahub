@@ -26,6 +26,8 @@ data class TrimmableStepSize(
     val messageId: Uuid,
     val messageIndex: Int,
     val partIndex: Int,
+    /** 工具调用 id：自动裁剪按它精确定位要标记的部件，不依赖下标 */
+    val toolCallId: String,
     val toolName: String,
     /** 工具输出原始体积（字节） */
     val bytes: Long,
@@ -50,6 +52,40 @@ data class HistoryTrimStats(
 
 fun UIMessagePart.isHistoryTrimmed(): Boolean =
     metadataAs<HistoryTrimMetadata>()?.trimmed == true
+
+/**
+ * 执行后可能留下副作用（改动文件、执行命令、写入记忆、发送通知等）的工具。
+ *
+ * 这类步骤的占位文本不能提示模型“重新调用工具读取”，否则模型为了确认输出会把命令再跑一遍。
+ */
+private val SIDE_EFFECT_TOOL_NAMES = setOf(
+    "workspace_shell",
+    "workspace_shell_kill",
+    "workspace_write_file",
+    "workspace_edit_file",
+    "workspace_export_file",
+    "android_shell",
+    "phone_use",
+    "eval_javascript",
+    "clipboard_tool",
+    "text_to_speech",
+    "calendar_create",
+    "memory_write",
+    "memory_str_replace",
+    "memory_append",
+    "memory_delete",
+)
+
+/** 该步骤对应的工具执行后是否可能留下副作用 */
+fun UIMessagePart.hasSideEffectTool(): Boolean {
+    val name = when (this) {
+        is UIMessagePart.Tool -> toolName
+        is UIMessagePart.ServerTool -> toolName
+        else -> ""
+    }
+    // MCP 工具无法按名字判断，一律按有副作用处理
+    return name in SIDE_EFFECT_TOOL_NAMES || name.startsWith("mcp__")
+}
 
 /**
  * 列出这些消息中体积达到裁剪门槛的工具调用与服务端搜索步骤（按旧 → 新排序）。
@@ -85,6 +121,7 @@ suspend fun List<UIMessage>.inspectHistoryTrim(provider: ProviderSetting?): Hist
                             messageId = message.id,
                             messageIndex = messageIndex,
                             partIndex = partIndex,
+                            toolCallId = part.toolCallId,
                             toolName = part.toolName,
                             bytes = effectiveRaw,
                             savedBytes = saved,
@@ -112,6 +149,7 @@ suspend fun List<UIMessage>.inspectHistoryTrim(provider: ProviderSetting?): Hist
                             messageId = message.id,
                             messageIndex = messageIndex,
                             partIndex = partIndex,
+                            toolCallId = part.toolCallId,
                             toolName = part.toolName.ifBlank { "server_tool" },
                             bytes = effectiveRaw,
                             savedBytes = saved,

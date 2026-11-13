@@ -147,7 +147,7 @@ class ChatRequestFactory(
         messages: List<UIMessage>,
         processingStatus: MutableStateFlow<String?>,
         takePendingParts: suspend () -> List<UIMessagePart> = { emptyList() },
-        pauseAfterTools: (UIMessage) -> Boolean = { false },
+        pauseAfterTools: suspend (UIMessage) -> Boolean = { false },
     ): Pair<AgentRequest, AgentHooks> {
         val request = AgentRequest(
             provider = usageRecorder.wrap(

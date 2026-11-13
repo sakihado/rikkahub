@@ -6,6 +6,7 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.util.canTrimClientTool
 import me.rerere.ai.util.canTrimServerTool
+import me.rerere.ai.util.hasSideEffectTool
 import me.rerere.ai.util.isHistoryTrimmed
 import me.rerere.ai.util.toolBriefHint
 import me.rerere.rikkahub.utils.formatBytes
@@ -44,15 +45,14 @@ private fun trimHistoryPart(part: UIMessagePart): List<UIMessagePart> {
         return when (part) {
             is UIMessagePart.Tool -> {
                 if (!part.canTrimClientTool()) return listOf(part)
-                listOf(
-                    part.copy(
-                        output = listOf(
-                            UIMessagePart.Text(
-                                text = "[历史工具输出已裁剪: ${part.toolName}$hint$sizeText。若需最新或完整内容，请重新调用工具读取]"
-                            )
-                        )
-                    )
-                )
+                // 有副作用的工具（执行命令、改文件、写记忆）不能提示模型重新调用，
+                // 否则它为了确认输出会把命令再跑一遍
+                val text = if (part.hasSideEffectTool()) {
+                    "[历史工具输出已裁剪: ${part.toolName}$hint$sizeText。结果已过期，请勿重复执行同一操作]"
+                } else {
+                    "[历史工具输出已裁剪: ${part.toolName}$hint$sizeText。若需最新或完整内容，请重新调用工具读取]"
+                }
+                listOf(part.copy(output = listOf(UIMessagePart.Text(text = text))))
             }
 
             is UIMessagePart.ServerTool -> {

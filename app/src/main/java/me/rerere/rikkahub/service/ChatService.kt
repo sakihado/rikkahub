@@ -38,6 +38,11 @@ import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyInputMessage
+import me.rerere.ai.ui.limitContext
+import me.rerere.ai.util.AutoTrimPlan
+import me.rerere.ai.util.BYTES_PER_TOKEN_ESTIMATE
+import me.rerere.ai.util.inspectHistoryTrim
+import me.rerere.ai.util.planAutoTrim
 import me.rerere.common.android.Logging
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.R
@@ -58,6 +63,7 @@ import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.applyAutoTrim
 import me.rerere.rikkahub.data.model.bindConfig
 import me.rerere.rikkahub.data.model.cancelInterruptedTools
 import me.rerere.rikkahub.data.model.deleteMessage
@@ -740,6 +746,11 @@ class ChatService(
             // 上一段是压缩后新开的；摘要加系统提示词本身就超过阈值时再压也没用，这一轮不再压缩
             var afterCompression = false
             var compressionUseless = false
+            // 本轮已经因自动裁剪释放的字节：裁剪后上一步请求返回的 usage 还停留在裁剪前的大小，
+            // 判定自动压缩阈值时要把这部分扣掉，否则会立刻再触发一次没必要的摘要压缩
+            var autoTrimmedBytes = 0L
+            // 本次暂停是因为自动裁剪而不是自动压缩
+            var pendingAutoTrim: AutoTrimPlan? = null
             try {
                 while (true) {
                     val replyNodeId = target.nodeId
@@ -750,7 +761,19 @@ class ChatService(
                         processingStatus = session.processingStatus,
                         takePendingParts = session.inbox::takeNotices,
                         pauseAfterTools = pause@{ message ->
-                            if (!canCompress || compressionUseless) return@pause false
+                            if (!canCompress) return@pause false
+                            // 先试本地自动裁剪：毫秒级、不打断这一轮回复，命中就直接停在这里
+                            val plan = planAutoTrimForStep(
+                                session = session,
+                                turn = turn,
+                                contextTokens = message.contextTokens(),
+                                trimmedBytes = autoTrimmedBytes,
+                            )
+                            if (plan != null) {
+                                pendingAutoTrim = plan
+                                return@pause true
+                            }
+                            if (compressionUseless) return@pause false
                             // 同一条回复只试一次，压缩失败后接着它写时不再重试
                             if (message.id == session.autoCompressedReplyId) return@pause false
                             if (!reachesAutoCompressThreshold(turn.model, message.contextTokens())) return@pause false
@@ -788,6 +811,19 @@ class ChatService(
                         }
                     }
                     if (finishReason != AgentFinishReason.Paused) break
+
+                    val trimPlan = pendingAutoTrim
+                    pendingAutoTrim = null
+                    if (trimPlan != null) {
+                        // 本地标记 + 落库：标记写在消息 metadata 里，水位线随会话持久化，只会前进不会回退。
+                        // 不插检查点，下一次运行接着同一条回复继续写
+                        applyAutoTrimPlan(session, trimPlan)
+                        autoTrimmedBytes += trimPlan.freedBytes
+                        afterCompression = false
+                        target = replyTargetOf(session.state.value, regenerateNodeId = null)
+                        session.replyMessageId.value = target.continuedMessageId
+                        continue
+                    }
 
                     afterCompression = compressMidTurn(session)
                     // 压缩成功：检查点在末尾，新开一条回复；失败：接着刚才那条回复写
@@ -1208,6 +1244,52 @@ class ChatService(
         val settings = settingsStore.settingsFlow.value
         if (!settings.enableAutoCompress || contextTokens == null || model.contextLength <= 0) return false
         return contextTokens >= model.contextLength * settings.autoCompressThreshold
+    }
+
+    /**
+     * 判断这一批工具执行完之后是否该做一次批量自动裁剪。
+     *
+     * 只看当前请求窗口（与真实请求、预览用同一套 [limitContext]），并跳过上下文检查点。
+     * 上一步请求返回的 usage 记的是裁剪前的体积，这里按已释放量扣掉，
+     * 避免刚裁完就误判为仍然超标、紧接着又跑一次 LLM 摘要压缩。
+     */
+    private suspend fun planAutoTrimForStep(
+        session: ConversationSession,
+        turn: ChatTurnContext,
+        contextTokens: Int?,
+        trimmedBytes: Long,
+    ): AutoTrimPlan? {
+        val config = turn.assistant.autoTrimConfig()
+        if (!config.isEnabled) return null
+        val effectiveContext = contextTokens
+            ?.let { (it - trimmedBytes / BYTES_PER_TOKEN_ESTIMATE).coerceAtLeast(0) }
+        val window = session.state.value.currentMessages
+            .limitContext(turn.assistant.contextMessageLimit)
+            .filterNot { it.isContextCheckpoint }
+        // 统计要遍历大文本，放到 IO 线程算
+        val stats = withContext(Dispatchers.IO) {
+            window.inspectHistoryTrim(turn.providerSetting)
+        }
+        return stats.planAutoTrim(config = config, contextTokens = effectiveContext)
+    }
+
+    /** 把一次自动裁剪计划写进会话并落库 */
+    private suspend fun applyAutoTrimPlan(session: ConversationSession, plan: AutoTrimPlan) {
+        session.update { latest ->
+            val trimmed = latest.currentMessages.applyAutoTrim(plan)
+            if (trimmed == latest.currentMessages) {
+                latest
+            } else {
+                val byId = trimmed.associateBy { it.id }
+                latest.copy(
+                    messageNodes = latest.messageNodes.map { node ->
+                        val replaced = node.messages.map { byId[it.id] ?: it }
+                        if (replaced == node.messages) node else node.copy(messages = replaced)
+                    }
+                )
+            }
+        }
+        session.flush()
     }
 
     /**

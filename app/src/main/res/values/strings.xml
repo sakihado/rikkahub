@@ -1906,4 +1906,17 @@
   <string name="tool_ui_android_shell">Host Shell: %1$s</string>
   <string name="tool_ui_android_shell_default">Android Host Shell</string>
   <string name="tool_ui_android_shell_blocked">Blocked by safety policy</string>
+
+  <!-- Auto trim history tool output -->
+  <string name="auto_trim_title">Auto-trim tool output</string>
+  <string name="auto_trim_hint">On long tasks, folds older tool and search outputs into a one-line placeholder once they pile up, keeping the most recent steps intact. Any slider at the far left turns it off.</string>
+  <string name="auto_trim_off">Off</string>
+  <string name="auto_trim_keep_steps">Keep recent steps</string>
+  <string name="auto_trim_keep_steps_desc">Tool output from this many recent steps stays intact; only older ones are folded.</string>
+  <string name="auto_trim_keep_steps_value">%1$d steps</string>
+  <string name="auto_trim_min_free">Minimum freed size</string>
+  <string name="auto_trim_min_free_desc">Only trim when at least this much can be freed, so prompt cache is not invalidated for tiny gains.</string>
+  <string name="auto_trim_context">Context watermark</string>
+  <string name="auto_trim_context_desc">Only batch-trim between tool calls once the context reaches this size.</string>
+  <string name="auto_trim_context_value">%1$d K</string>
 </resources>

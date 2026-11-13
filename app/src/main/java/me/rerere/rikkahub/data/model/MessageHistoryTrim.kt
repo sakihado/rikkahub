@@ -8,6 +8,7 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.limitContext
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.MIN_TRIMMABLE_TOOL_OUTPUT_BYTES
+import me.rerere.ai.util.AutoTrimPlan
 import me.rerere.ai.util.canTrimClientTool
 import me.rerere.ai.util.canTrimServerTool
 import me.rerere.ai.util.estimateServerToolBytes
@@ -101,6 +102,39 @@ fun UIMessagePart.restoreTrimmedHistory(): UIMessagePart {
         is UIMessagePart.Tool -> copy(metadata = cleaned)
         is UIMessagePart.ServerTool -> copy(metadata = cleaned)
         else -> this
+    }
+}
+
+/**
+ * 按自动裁剪计划标记这些消息里对应的工具/搜索步骤。
+ *
+ * 只处理 [AutoTrimPlan] 点名的那几个步骤，标记写入消息 metadata 后随会话一起落库，
+ * 因此水位线只前进不回退，重启后也不会重新裁一遍。
+ */
+fun List<UIMessage>.applyAutoTrim(plan: AutoTrimPlan): List<UIMessage> {
+    if (plan.targets.isEmpty()) return this
+    // 消息 id → (工具调用 id → 原始体积)，体积用统计时算好的值，这里不再重复估算
+    val targets = plan.targets.groupBy { it.messageId }
+        .mapValues { (_, steps) -> steps.associate { it.toolCallId to it.bytes } }
+    return map { message ->
+        val byToolCall = targets[message.id] ?: return@map message
+        var changed = false
+        val parts = message.parts.map { part ->
+            val toolCallId = when (part) {
+                is UIMessagePart.Tool -> part.toolCallId
+                is UIMessagePart.ServerTool -> part.toolCallId
+                else -> null
+            }
+            val bytes = toolCallId?.let { byToolCall[it] }
+            if (bytes == null || part.isHistoryTrimmed()) return@map part
+            changed = true
+            when (part) {
+                is UIMessagePart.Tool -> part.withHistoryTrim(bytes)
+                is UIMessagePart.ServerTool -> part.withHistoryTrim(bytes)
+                else -> part
+            }
+        }
+        if (changed) message.copy(parts = parts) else message
     }
 }
 
