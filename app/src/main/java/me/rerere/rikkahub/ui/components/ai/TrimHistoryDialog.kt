@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ContainedLoadingIndicator
@@ -17,6 +18,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -24,8 +26,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import me.rerere.ai.util.HistoryTrimStats
+import kotlinx.coroutines.withContext
+import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.util.inspectHistoryTrim
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.Remove01
@@ -34,17 +40,23 @@ import me.rerere.rikkahub.utils.formatBytes
 
 /**
  * 「裁剪历史」确认弹窗：显示折叠较早工具/搜索大输出后可节省多少体积，并允许保留最近若干条消息。
+ *
+ * 统计要遍历大文本、读附件长度，放到 IO 线程算。
  */
 @Composable
 fun TrimHistoryDialog(
-    stats: HistoryTrimStats,
-    totalMessages: Int,
+    messages: List<UIMessage>,
+    provider: ProviderSetting?,
     onDismiss: () -> Unit,
     onConfirm: (keepRecentMessages: Int) -> Job,
 ) {
     var keepRecentMessages by remember { mutableIntStateOf(DEFAULT_KEEP_RECENT_MESSAGES) }
     var currentJob by remember { mutableStateOf<Job?>(null) }
     val isLoading = currentJob?.isActive == true
+
+    val stats by produceState(initialValue = null, messages, provider) {
+        value = withContext(Dispatchers.IO) { messages.inspectHistoryTrim(provider) }
+    }
 
     LaunchedEffect(currentJob) {
         currentJob?.join()
@@ -54,9 +66,10 @@ fun TrimHistoryDialog(
         currentJob = null
     }
 
+    val totalMessages = messages.size
     val cutoffIndex = (totalMessages - keepRecentMessages.coerceAtLeast(0)).coerceAtLeast(0)
-    val targets = remember(stats.steps, cutoffIndex) {
-        stats.steps.filter { it.messageIndex < cutoffIndex && !it.trimmed }
+    val targets = remember(stats, cutoffIndex) {
+        stats?.steps.orEmpty().filter { it.messageIndex < cutoffIndex && !it.trimmed }
     }
     val freedBytes = remember(targets) { targets.sumOf { it.savedBytes } }
 
@@ -65,8 +78,9 @@ fun TrimHistoryDialog(
         title = { Text(stringResource(R.string.chat_trim_history)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                if (isLoading) {
+                if (isLoading || stats == null) {
                     Row(
+                        modifier = Modifier.height(48.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
@@ -74,6 +88,7 @@ fun TrimHistoryDialog(
                         Text(stringResource(R.string.chat_trim_history))
                     }
                 } else {
+                    val trimStats = stats!!
                     Text(
                         text = stringResource(R.string.chat_trim_history_desc),
                         style = MaterialTheme.typography.bodyMedium,
@@ -81,8 +96,17 @@ fun TrimHistoryDialog(
 
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = stats.activeBytes.formatBytes(),
+                            text = trimStats.activeBytes.formatBytes(),
                             style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            text = stringResource(
+                                R.string.chat_trim_history_count,
+                                trimStats.totalCount,
+                                trimStats.trimmedCount,
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
                             text = if (targets.isNotEmpty()) {

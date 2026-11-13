@@ -91,6 +91,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
 import me.rerere.hugeicons.stroke.ArrowUp02
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.Clean
 import me.rerere.hugeicons.stroke.ComputerTerminal01
 import me.rerere.hugeicons.stroke.Fullscreen
 import me.rerere.hugeicons.stroke.Zap
@@ -144,6 +145,9 @@ fun ChatInput(
     onResumeMessageQueue: () -> Unit = {},
     runningBackgroundTasks: Int = 0,
     onShowBackgroundTasks: () -> Unit = {},
+    // 上下文里还有可折叠的大体积工具/搜索输出时才显示「裁剪历史」，避免常态占用工具栏
+    trimHistoryAvailable: Boolean = false,
+    onTrimHistoryClick: () -> Unit = {},
     workspaceHostAccess: Boolean = false,
     onDisableWorkspaceHostAccess: () -> Unit = {},
     onStartVoiceMode: (() -> Unit)? = null,
@@ -342,6 +346,16 @@ fun ChatInput(
                                         },
                                         onlyIcon = true,
                                     )
+                                }
+
+                                // 裁剪历史：折叠较早的工具大输出与联网搜索原文，保留正文与工具骨架
+                                if (trimHistoryAvailable) {
+                                    ActionIconButton(onClick = onTrimHistoryClick) {
+                                        Icon(
+                                            imageVector = HugeIcons.Clean,
+                                            contentDescription = stringResource(R.string.chat_trim_history),
+                                        )
+                                    }
                                 }
                             }
 
