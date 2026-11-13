@@ -261,7 +261,7 @@ object ShellPolicyEngine {
         if (splitResult.hasExpansionOrSubshell) {
             highestDecision = maxOf(highestDecision, PolicyDecision.ASK)
             if (askReason.isEmpty()) {
-                askReason = "包含变量/命令替换 ($VAR / $() / 反引号) 或子 Shell，需人工确认"
+                askReason = "包含变量/命令替换 (\$VAR / \$() / 反引号) 或子 Shell，需人工确认"
             }
             allowSessionRemember = false
         }

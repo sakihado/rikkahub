@@ -247,7 +247,7 @@ private fun buildWorkspacePrompt(
             "- Read-Only Phone Storage (`/sdcard` and `/storage/emulated/0`): Mounted strictly READ-ONLY (`EROFS`) for this conversation. You may inspect, search, or copy files from `/sdcard` into `/workspace`, but any attempt to write, modify, rename, or delete files under `/sdcard` will fail with `Read-only file system`. Use `workspace_export_file` to export artifacts to `Download/RikkaHub`."
         )
         appendLine(
-            "- Read-Only Android Host Probe (`host-sh`): Inside `workspace_shell`, run `host-sh \"<readonly_android_query>\"` to execute a single read-only Android diagnostic command (UID 2000 shell: `getprop`, `dumpsys <service>`, `pm list/path/dump`, `settings get/list`, `logcat -d`, `wm size/density`, `ps`, `df`) and pipe its stdout into Linux tools (`python3`, `jq`, `awk`, `grep`). Shell operators (`|`, `;`, `>`, `$`) are not allowed inside the `host-sh` argument itself; always pipe and filter in the outer `workspace_shell`."
+            "- Read-Only Android Host Probe (`host-sh`): Inside `workspace_shell`, run `host-sh \"<readonly_android_query>\"` to execute a single read-only Android diagnostic command (UID 2000 shell: `getprop`, `dumpsys <service>`, `pm list/path/dump`, `settings get/list`, `logcat -d`, `wm size/density`, `ps`, `df`) and pipe its stdout into Linux tools (`python3`, `jq`, `awk`, `grep`). Shell operators (`|`, `;`, `>`, `\$`) are not allowed inside the `host-sh` argument itself; always pipe and filter in the outer `workspace_shell`."
         )
     }
     if (!cwd.isNullOrBlank()) {
