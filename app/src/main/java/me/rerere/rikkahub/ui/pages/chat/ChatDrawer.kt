@@ -108,6 +108,7 @@ fun ChatDrawerContent(
     vm: ChatVM,
     settings: Settings,
     current: Conversation,
+    onCloseDrawer: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -318,7 +319,11 @@ fun ChatDrawerContent(
                     .fillMaxWidth()
                     .weight(1f),
                 onClick = {
-                    navigateToChatPage(navController, it.id)
+                    if (it.id == current.id) {
+                        onCloseDrawer()
+                    } else {
+                        navigateToChatPage(navController, it.id)
+                    }
                 },
                 onRegenerateTitle = {
                     vm.generateTitle(it, true)

@@ -15,6 +15,7 @@ import me.rerere.rikkahub.hostshell.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.RootPhoneController
 import me.rerere.rikkahub.service.BackgroundShellManager
+import me.rerere.rikkahub.service.ChatDraftManager
 import me.rerere.rikkahub.service.ChatFloatingTracker
 import me.rerere.rikkahub.service.ChatNotificationManager
 import me.rerere.rikkahub.service.ChatService
@@ -176,6 +177,15 @@ val appModule = module {
     }
 
     single {
+        val context: android.content.Context = get()
+        ChatDraftManager(
+            storageFile = File(context.filesDir, "chat_drafts.json"),
+            scope = get<AppScope>(),
+            json = get(),
+        )
+    }
+
+    single {
         ChatService(
             context = get(),
             appScope = get(),
@@ -190,6 +200,7 @@ val appModule = module {
             filesManager = get(),
             folderRepository = get(),
             backgroundShellManager = get(),
+            chatDraftManager = get(),
             hostPrivilegeManager = get(),
             shellApprovalStore = get(),
         )

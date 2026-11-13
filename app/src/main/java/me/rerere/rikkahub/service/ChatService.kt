@@ -131,6 +131,7 @@ class ChatService(
     private val filesManager: FilesManager,
     private val folderRepository: FolderRepository,
     private val backgroundShellManager: BackgroundShellManager,
+    private val chatDraftManager: ChatDraftManager,
     private val hostPrivilegeManager: HostPrivilegeManager? = null,
     private val shellApprovalStore: ShellApprovalStore? = null,
 ) {
@@ -228,6 +229,7 @@ class ChatService(
     fun cleanup() = runCatching { sessionManager.cleanup() }
 
     init {
+        chatDraftManager.setOrphanAttachmentHandler(::cleanupUnreferencedAttachmentUrls)
         appScope.launch {
             backgroundShellManager.noticeEvents.collect { event ->
                 when (event) {
@@ -286,6 +288,15 @@ class ChatService(
     /** 任务槽里的任务在做什么，槽空着时是 null */
     fun getActivityFlow(conversationId: Uuid): Flow<SessionActivity?> =
         sessionManager.getActivityFlow(conversationId)
+
+    /** 会话是否已开始（已落库、正在生成或已有待发消息），用于区分正式会话草稿与空白新对话草稿 */
+    fun isConversationStarted(conversationId: Uuid): Boolean {
+        val session = sessionManager.get(conversationId) ?: return false
+        return session.existsInDatabase ||
+            session.isGenerating ||
+            session.submittingMessage != null ||
+            session.inbox.state.value.messages.isNotEmpty()
+    }
 
     private fun launchGenerationJob(
         conversationId: Uuid,
@@ -379,7 +390,8 @@ class ChatService(
         val queuedFiles = (session?.inbox?.state?.value?.messages.orEmpty() +
             listOfNotNull(session?.submittingMessage))
             .flatMap { it.parts }.localFileUrls().map { it.toUri() }
-        val retainedFiles = (current.files + queuedFiles).toSet()
+        val draftFiles = chatDraftManager.allReferencedLocalFileUrls().map { it.toUri() }
+        val retainedFiles = (current.files + queuedFiles + draftFiles).toSet()
         val deletedFiles = previous.files.filter { it !in retainedFiles }
         if (deletedFiles.isNotEmpty()) {
             filesManager.deleteChatFiles(deletedFiles)
@@ -413,29 +425,33 @@ class ChatService(
     }
 
     private fun cleanupQueuedAttachments(previous: QueuedMessage) {
-        val candidates = previous.parts.localFileUrls()
+        cleanupUnreferencedAttachmentUrls(previous.parts.localFileUrls())
+    }
+
+    private fun cleanupUnreferencedAttachmentUrls(candidates: Set<String>) {
         if (candidates.isEmpty()) return
-        appScope.launch {
+        appScope.launch(Dispatchers.IO) {
             try {
                 // 未打开的会话及未选中的分支也可能引用同一附件。
                 val persistedReferences =
                     candidates.filter { conversationRepo.hasFileReference(it) }.toSet()
-                // 数据库查询挂起期间队列可能已推进，删除前重新读取内存引用。
+                // 数据库查询挂起期间队列或草稿可能已变化，删除前重新读取内存引用。
                 val currentSessions = sessionManager.snapshot()
-                val unusedFiles = unreferencedQueuedAttachmentUrls(
-                    previous = previous,
-                    conversations = currentSessions.map { it.state.value },
-                    pendingMessages = currentSessions.flatMap {
-                        it.inbox.state.value.messages + listOfNotNull(it.submittingMessage)
-                    },
-                ) - persistedReferences
+                val sessionReferences = currentSessions.flatMap { session ->
+                    session.state.value.messageNodes.flatMap { node ->
+                        node.messages.flatMap { it.parts }
+                    } + session.inbox.state.value.messages.flatMap { it.parts } +
+                        listOfNotNull(session.submittingMessage).flatMap { it.parts }
+                }.localFileUrls()
+                val draftReferences = chatDraftManager.allReferencedLocalFileUrls()
+                val unusedFiles = candidates - persistedReferences - sessionReferences - draftReferences
                 if (unusedFiles.isNotEmpty()) {
                     filesManager.deleteChatFiles(unusedFiles.map { it.toUri() })
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 // 无法确认引用时保留文件，避免误删。
-                Log.w(TAG, "Failed to clean queued attachments", e)
+                Log.w(TAG, "Failed to clean unreferenced attachments", e)
             }
         }
     }
@@ -1545,6 +1561,7 @@ class ChatService(
      * 还停在这个会话上的页面看到的是空会话，之后再发消息会新建记录，不会写回已删除的那条。
      */
     suspend fun deleteConversation(conversationId: Uuid) {
+        val discardedDraftUrls = chatDraftManager.discard(DraftKey.Conversation(conversationId))
         val session = sessionManager.getOrCreate(conversationId)
         discardQueuedMessages(session)
         session.replace(newConversation(conversationId), existsInDatabase = false) { previous ->
@@ -1553,9 +1570,15 @@ class ChatService(
             previous?.let { filesManager.deleteChatFiles(it.files) }
         }
         sessionManager.removeIfIdle(session)
+        cleanupUnreferencedAttachmentUrls(discardedDraftUrls)
         shellApprovalStore?.clearConversation(conversationId.toString())
         // 后台命令随会话一起终止, 撤销删除也不会恢复; 终止要等宽限期, 不阻塞删除
         appScope.launch { backgroundShellManager.killConversation(conversationId) }
+    }
+
+    fun discardAssistantNewChatDraft(assistantId: Uuid) {
+        val discardedUrls = chatDraftManager.discard(DraftKey.NewChat(assistantId))
+        cleanupUnreferencedAttachmentUrls(discardedUrls)
     }
 
     suspend fun deleteConversationsOfAssistant(assistantId: Uuid) {

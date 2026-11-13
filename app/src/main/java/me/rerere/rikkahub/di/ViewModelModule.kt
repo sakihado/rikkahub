@@ -5,6 +5,7 @@ import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantDetailVM
 import me.rerere.rikkahub.ui.pages.backup.BackupVM
 import me.rerere.rikkahub.ui.pages.chat.ChatDrawerVM
 import me.rerere.rikkahub.ui.pages.chat.ChatVM
+import me.rerere.rikkahub.ui.pages.chat.ChatVMArgs
 import me.rerere.rikkahub.ui.pages.debug.DebugVM
 import me.rerere.rikkahub.ui.pages.extensions.PromptVM
 import me.rerere.rikkahub.ui.pages.extensions.QuickMessagesVM
@@ -31,10 +32,11 @@ import org.koin.dsl.module
 val viewModelModule = module {
     viewModel<ChatVM> { params ->
         ChatVM(
-            id = params.get(),
+            args = params.get<ChatVMArgs>(),
             context = get(),
             settingsStore = get(),
             chatService = get(),
+            chatDraftManager = get(),
             updateChecker = get(),
             analytics = get(),
             filesManager = get(),

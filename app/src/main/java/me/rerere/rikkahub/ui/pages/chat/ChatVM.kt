@@ -1,18 +1,17 @@
 package me.rerere.rikkahub.ui.pages.chat
 
 import android.app.Application
-import android.content.Context
+import android.net.Uri
 import android.util.Log
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.runtime.snapshotFlow
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.analytics.FirebaseAnalytics
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -24,6 +23,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -40,34 +40,53 @@ import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.NodeFavoriteTarget
 import me.rerere.rikkahub.data.model.getAssistantOf
 import me.rerere.rikkahub.data.model.getChatModelOf
+import me.rerere.rikkahub.data.model.localFileUrls
 import me.rerere.rikkahub.data.repository.FavoriteRepository
 import me.rerere.rikkahub.service.BackgroundShellManager
 import me.rerere.rikkahub.service.BackgroundShellTask
+import me.rerere.rikkahub.service.ChatDraft
+import me.rerere.rikkahub.service.ChatDraftManager
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.service.ChatService
+import me.rerere.rikkahub.service.DraftKey
 import me.rerere.rikkahub.service.SessionActivity
-import me.rerere.rikkahub.ui.hooks.writeStringPreference
 import me.rerere.rikkahub.ui.hooks.ChatInputState
+import me.rerere.rikkahub.ui.hooks.writeStringPreference
 import me.rerere.rikkahub.utils.UiState
 import me.rerere.rikkahub.utils.UpdateChecker
+import me.rerere.rikkahub.utils.base64Decode
 import me.rerere.rikkahub.web.ApiException
 import java.util.Locale
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatVM"
 
+data class ChatVMArgs(
+    val id: String,
+    val initText: String? = null,
+    val initFiles: List<Uri> = emptyList(),
+)
+
 class ChatVM(
-    id: String,
+    args: ChatVMArgs,
     private val context: Application,
     private val settingsStore: SettingsStore,
     private val chatService: ChatService,
+    private val chatDraftManager: ChatDraftManager,
     val updateChecker: UpdateChecker,
     private val analytics: FirebaseAnalytics,
     private val filesManager: FilesManager,
     private val favoriteRepository: FavoriteRepository,
     private val backgroundShellManager: BackgroundShellManager,
 ) : ViewModel() {
-    private val _conversationId: Uuid = Uuid.parse(id)
+    private val _conversationId: Uuid = Uuid.parse(args.id)
+    private val initText: String? = args.initText
+    private val initFiles: List<Uri> = args.initFiles
+    private val draftOwnerId: Uuid = Uuid.random()
+    private var activeDraftKey: DraftKey? = null
+    private var hasStartedConversation: Boolean = false
+    private var draftInitialized: Boolean = false
+    private var conversationDeleted: Boolean = false
     val conversation: StateFlow<Conversation> = chatService.getConversationFlow(_conversationId)
     var chatListInitialized by mutableStateOf(false) // 聊天列表是否已经滚动到底部
 
@@ -101,9 +120,81 @@ class ChatVM(
         // 添加对话引用
         chatService.addConversationReference(_conversationId)
 
-        // 初始化对话
+        // 初始化对话并恢复输入草稿
         viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                chatDraftManager.ensureLoaded()
+            }
             chatService.initializeConversation(_conversationId)
+            if (conversationDeleted) return@launch
+
+            if (chatService.isConversationStarted(_conversationId)) {
+                hasStartedConversation = true
+            }
+            val initialKey = resolveDraftKey()
+            activeDraftKey = initialKey
+
+            val decodedInitText = initText?.base64Decode()?.takeIf { it.isNotEmpty() }
+            val hasExternalInit = decodedInitText != null || initFiles.isNotEmpty()
+
+            if (hasExternalInit) {
+                val initParts = if (initFiles.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        initFiles.mapNotNull { sourceUri ->
+                            val type = filesManager.getFileMimeType(sourceUri)
+                            val localFile = filesManager.createChatFilesByContents(listOf(sourceUri)).firstOrNull()
+                                ?: return@mapNotNull null
+                            when {
+                                type?.startsWith("image/") == true -> UIMessagePart.Image(url = localFile.toString())
+                                type?.startsWith("video/") == true -> UIMessagePart.Video(url = localFile.toString())
+                                type?.startsWith("audio/") == true -> UIMessagePart.Audio(url = localFile.toString())
+                                else -> null
+                            }
+                        }
+                    }
+                } else {
+                    emptyList()
+                }
+                if (conversationDeleted) {
+                    if (initParts.isNotEmpty()) {
+                        filesManager.deleteChatFiles(initParts.localFileUrls().map { it.toUri() })
+                    }
+                    return@launch
+                }
+                if (initParts.isNotEmpty()) {
+                    inputState.messageContent = initParts
+                }
+                if (decodedInitText != null) {
+                    inputState.setMessageText(decodedInitText)
+                }
+                chatDraftManager.bindOwner(
+                    key = initialKey,
+                    ownerId = draftOwnerId,
+                    initialDraft = inputState.toDraft(),
+                    snapshotProvider = inputState::toDraft,
+                    onDiscarded = ::onDraftDiscardedExternally,
+                )
+            } else {
+                val restored = chatDraftManager.attachAndRestore(
+                    key = initialKey,
+                    ownerId = draftOwnerId,
+                    snapshotProvider = inputState::toDraft,
+                    onDiscarded = ::onDraftDiscardedExternally,
+                )
+                if (restored != null && inputState.isEmpty() && !inputState.isEditing()) {
+                    inputState.restoreDraft(
+                        draft = restored,
+                        canRestoreEditing = { messageId ->
+                            conversation.value.getMessageNodeByMessageId(messageId) != null
+                        },
+                    )
+                } else if (!inputState.isEmpty() || inputState.isEditing()) {
+                    chatDraftManager.update(initialKey, draftOwnerId, inputState.toDraft())
+                }
+            }
+
+            draftInitialized = true
+            observeInputDraftChanges()
         }
 
         // 记住对话ID, 方便下次启动恢复
@@ -111,10 +202,81 @@ class ChatVM(
     }
 
     override fun onCleared() {
+        if (!conversationDeleted && draftInitialized) {
+            val key = activeDraftKey ?: resolveDraftKey()
+            chatDraftManager.detach(key, draftOwnerId, inputState.toDraft())
+        }
         voiceSession.stop()
         super.onCleared()
         // 移除对话引用
         chatService.removeConversationReference(_conversationId)
+    }
+
+    private fun resolveDraftKey(): DraftKey {
+        if (hasStartedConversation || chatService.isConversationStarted(_conversationId)) {
+            hasStartedConversation = true
+            return DraftKey.Conversation(_conversationId)
+        }
+        return DraftKey.NewChat(conversation.value.assistantId)
+    }
+
+    private suspend fun observeInputDraftChanges() {
+        snapshotFlow { inputState.toDraft() }
+            .distinctUntilChanged { old, new -> old.hasSameContent(new) }
+            .collect { draft ->
+                if (conversationDeleted || !draftInitialized) return@collect
+                syncCurrentDraft(draft)
+            }
+    }
+
+    private fun syncCurrentDraft(draft: ChatDraft) {
+        val currentKey = resolveDraftKey()
+        val previousKey = activeDraftKey
+        if (previousKey != null && previousKey != currentKey) {
+            chatDraftManager.transferDraftKey(
+                fromKey = previousKey,
+                toKey = currentKey,
+                ownerId = draftOwnerId,
+                currentDraft = draft,
+                snapshotProvider = inputState::toDraft,
+                onDiscarded = ::onDraftDiscardedExternally,
+            )
+            activeDraftKey = currentKey
+            return
+        }
+        activeDraftKey = currentKey
+        chatDraftManager.update(currentKey, draftOwnerId, draft)
+    }
+
+    private fun onMessageSubmitted() {
+        hasStartedConversation = true
+        val convKey = DraftKey.Conversation(_conversationId)
+        val previousKey = activeDraftKey
+        if (previousKey is DraftKey.NewChat) {
+            chatDraftManager.promoteOnFirstSend(
+                fromKey = previousKey,
+                toKey = convKey,
+                ownerId = draftOwnerId,
+                snapshotProvider = inputState::toDraft,
+                onDiscarded = ::onDraftDiscardedExternally,
+            )
+        } else {
+            chatDraftManager.clearOnSend(convKey, draftOwnerId)
+        }
+        activeDraftKey = convKey
+    }
+
+    private fun onEditSubmitted() {
+        val key = activeDraftKey ?: resolveDraftKey()
+        chatDraftManager.clearOnSend(key, draftOwnerId)
+    }
+
+    private fun onDraftDiscardedExternally() {
+        viewModelScope.launch {
+            hasStartedConversation = false
+            activeDraftKey = null
+            inputState.clearInput()
+        }
     }
 
     // 用户设置
@@ -243,8 +405,9 @@ class ChatVM(
      * @param content 消息内容
      * @param answer 是否触发消息生成，如果为false，则仅添加消息到消息列表中
      */
-    fun handleMessageSend(content: List<UIMessagePart>,answer: Boolean = true) {
+    fun handleMessageSend(content: List<UIMessagePart>, answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
+        onMessageSubmitted()
         analytics.logEvent("ai_send_message", null)
 
         chatService.sendMessage(_conversationId, content, answer)
@@ -252,6 +415,7 @@ class ChatVM(
 
     fun handleMessageEdit(parts: List<UIMessagePart>, messageId: Uuid) {
         if (parts.isEmptyInputMessage()) return
+        onEditSubmitted()
         analytics.logEvent("ai_edit_message", null)
 
         viewModelScope.launch {
@@ -351,10 +515,20 @@ class ChatVM(
         }
     }
 
-    fun deleteConversation(conversation: Conversation): Job =
-        viewModelScope.launch {
+    fun deleteConversation(conversation: Conversation): Job {
+        val currentKey = activeDraftKey
+        if (conversation.id == _conversationId) {
+            conversationDeleted = true
+            activeDraftKey = null
+            inputState.clearInput()
+            if (currentKey is DraftKey.NewChat) {
+                chatService.discardAssistantNewChatDraft(currentKey.assistantId)
+            }
+        }
+        return viewModelScope.launch {
             chatService.deleteConversation(conversation.id)
         }
+    }
 
     fun updatePinnedStatus(conversation: Conversation) {
         viewModelScope.launch {

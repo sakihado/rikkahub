@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.service.ChatDraft
 import kotlin.uuid.Uuid
 
 class ChatInputState {
@@ -113,6 +114,55 @@ class ChatInputState {
 
     fun isEmpty(): Boolean {
         return textContent.text.isBlank() && messageContent.isEmpty()
+    }
+
+    fun toDraft(updatedAt: Long = System.currentTimeMillis()): ChatDraft {
+        return ChatDraft(
+            text = textContent.text.toString(),
+            attachments = messageContent.toList(),
+            updatedAt = updatedAt,
+            editingMessage = editingMessage,
+            editingReasoning = editingReasoning?.text?.toString(),
+            editingParts = editingParts?.toList(),
+        )
+    }
+
+    fun restoreDraft(
+        draft: ChatDraft,
+        canRestoreEditing: (Uuid) -> Boolean = { true },
+    ) {
+        val targetEditingMessage = draft.editingMessage
+        if (targetEditingMessage != null) {
+            if (!canRestoreEditing(targetEditingMessage)) {
+                clearInput()
+                return
+            }
+            val originalParts = draft.editingParts
+            if (originalParts != null) {
+                setContents(originalParts)
+                editingMessage = targetEditingMessage
+                textContent.setTextAndPlaceCursorAtEnd(draft.text)
+                messageContent = draft.attachments
+                if (draft.editingReasoning != null) {
+                    editingReasoning?.setTextAndPlaceCursorAtEnd(draft.editingReasoning)
+                }
+            } else {
+                editingMessage = targetEditingMessage
+                editingParts = null
+                editingAttachmentUrls = emptySet()
+                editingReasoning = draft.editingReasoning?.let { TextFieldState(it) }
+                textContent.setTextAndPlaceCursorAtEnd(draft.text)
+                messageContent = draft.attachments
+            }
+            return
+        }
+
+        editingMessage = null
+        editingReasoning = null
+        editingParts = null
+        editingAttachmentUrls = emptySet()
+        textContent.setTextAndPlaceCursorAtEnd(draft.text)
+        messageContent = draft.attachments
     }
 
     fun addImages(uris: List<Uri>) {

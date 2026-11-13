@@ -45,6 +45,7 @@ class AssistantVM(
                 settings.copy(assistants = settings.assistants.filter { it.id != assistant.id })
             }
             memoryRepository.deleteFilesOfAssistant(assistant.id.toString())
+            chatService.discardAssistantNewChatDraft(assistant.id)
             chatService.deleteConversationsOfAssistant(assistant.id)
         }
     }
