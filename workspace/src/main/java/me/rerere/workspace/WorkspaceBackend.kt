@@ -144,6 +144,7 @@ interface WorkspaceBackend {
         stdin: ByteArray? = null,
     ): WorkspaceCommandResult
 
-    /** 在后台启动命令并立即返回, 见 [WorkspaceBackgroundCommand] */
-    fun startBackgroundCommand(command: String, cwd: String, id: String): WorkspaceBackgroundCommand
+    /** 在后台启动命令并立即返回, 见 [WorkspaceBackgroundCommand]; 不支持的环境抛异常 */
+    fun startBackgroundCommand(command: String, cwd: String, id: String): WorkspaceBackgroundCommand =
+        throw UnsupportedOperationException("Background commands are not supported in this workspace")
 }

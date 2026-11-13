@@ -44,23 +44,25 @@ class WorkspaceManager(
 
     fun workspaceDir(root: String): File = File(baseDir, root)
 
-    fun filesDir(root: String): File = File(workspaceDir(root), "files")
+    fun filesDir(root: String): File = File(workspaceDir(root), FILES_DIR)
 
-    fun linuxDir(root: String): File = File(workspaceDir(root), "linux")
+    fun linuxDir(root: String): File = File(workspaceDir(root), LINUX_DIR)
 
-    fun tempDir(root: String): File = File(linuxDir(root), "tmp")
+    fun tempDir(root: String): File = File(workspaceDir(root), TEMP_DIR)
 
     /**
-     * 清理所有工作区遗留的运行期临时目录 (`linux/tmp`).
+     * 清理所有工作区遗留的运行期临时目录 (`tmp`).
      *
      * 正常退出时进程会自行清理临时文件, 但应用进程被系统杀死或崩溃时可能残留
      * PRoot 临时文件、命令输出缓冲或构建中间物. 仅在应用启动早期、尚无任何会话运行时调用.
+     *
+     * 注意这里只清宿主机侧的 PRoot 临时目录, 不动 Rootfs 内的 `linux/tmp`, 那是容器自己的 `/tmp`.
      */
     fun cleanupTempDirs() {
         val workspaces = baseDir.listFiles() ?: return
         for (workspace in workspaces) {
             if (!workspace.isDirectory) continue
-            val tmp = File(workspace, "linux/tmp")
+            val tmp = File(workspace, TEMP_DIR)
             if (tmp.isDirectory) {
                 tmp.listFiles()?.forEach { child ->
                     runCatching { child.deleteRecursively() }
@@ -115,7 +117,8 @@ class WorkspaceManager(
         inputStream: InputStream,
     ): WorkspaceFileEntry {
         ensureWorkspace(root)
-        return fileSystem.importStream(areaRoot(root, area), destinationPath, fileName, inputStream)
+        val targetPath = if (destinationPath.isBlank()) fileName else "$destinationPath/$fileName"
+        return fileSystem.importBytes(areaRoot(root, area), targetPath, inputStream)
     }
 
     fun exportFile(
@@ -125,12 +128,18 @@ class WorkspaceManager(
         outputStream: OutputStream,
     ) {
         ensureWorkspace(root)
-        fileSystem.exportStream(areaRoot(root, area), path, outputStream)
+        val file = fileSystem.resolve(areaRoot(root, area), path)
+        require(file.exists()) { "File does not exist: $path" }
+        require(file.isFile) { "Path is not a file: $path" }
+        outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
     }
 
     fun fileSize(root: String, area: WorkspaceStorageArea, path: String): Long {
         ensureWorkspace(root)
-        return fileSystem.fileSize(areaRoot(root, area), path)
+        val file = fileSystem.resolve(areaRoot(root, area), path)
+        require(file.exists()) { "File does not exist: $path" }
+        require(file.isFile) { "Path is not a file: $path" }
+        return file.length()
     }
 
     /** Rootfs 内绝对路径在宿主机上的落点: 对应的宿主目录和目录内的相对路径 */
@@ -290,6 +299,13 @@ class WorkspaceManager(
 
         /** Rootfs 内默认用户的 HOME 目录 */
         const val ROOTFS_HOME_DIR = "/root"
+
+        /** 工作区在宿主机应用私有目录下的子目录名 */
+        private const val FILES_DIR = "files"
+        private const val LINUX_DIR = "linux"
+
+        /** 宿主机侧的 PRoot 临时目录名, 只用于 PROOT_TMP_DIR 与安装解压, 不是容器内的 /tmp */
+        private const val TEMP_DIR = "tmp"
 
         /** PRoot 运行时绑定进 Rootfs 的宿主机内核/设备伪文件系统 */
         val KERNEL_FS_MOUNTS = listOf("/dev", "/proc", "/sys")
