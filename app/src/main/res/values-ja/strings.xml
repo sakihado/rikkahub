@@ -1459,6 +1459,8 @@ mDNSアドレス: .localホスト名を使用し、IPを知らなくても同じ
   <string name="video_player_error">この動画を再生できません</string>
   <string name="video_player_open_with">別のアプリで開く</string>
   <string name="chat_page_export_include_reasoning">推論をエクスポート</string>
+  <string name="chat_page_export_include_tool_steps">ツール手順をエクスポート</string>
+  <string name="chat_page_export_embed_images">画像を埋め込む（サイズ大）</string>
   <string name="common_delete_confirm_message">\"%s\"を削除してもよろしいですか？この操作は元に戻せません。</string>
   <string name="media_creation_title">メディア作成</string>
   <string name="media_creation_notification_running">%1$d件のタスクが生成中</string>

@@ -123,12 +123,31 @@ import java.time.LocalDateTime
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.DurationUnit
 
+/**
+ * 一份图片在导出文件里以什么形式存在。
+ *
+ * 纯文本格式（Markdown）里内嵌 base64 会让文件暴涨几个数量级，所以默认只留占位；
+ * 将来加 HTML/PDF 这类能正常带图的格式时，只要在 [ChatExportFormat.defaultMedia] 上
+ * 换成 [DataUri] 或 [Link]，导出逻辑不用改。
+ */
+enum class MediaCarrier {
+    /** 只留一段占位文字，不写入任何图片数据 */
+    Placeholder,
+
+    /** 内嵌为 `data:image/...;base64,...`，单文件自包含但体积最大 */
+    DataUri,
+
+    /** 写入原始 url（file:// 等），文件小但换设备就失效 */
+    Link,
+}
+
 private enum class ChatExportFormat(
     val extension: String,
     val mimeType: String,
+    val defaultMedia: MediaCarrier,
 ) {
-    Markdown("md", "text/markdown"),
-    Image("png", "image/png"),
+    Markdown("md", "text/markdown", MediaCarrier.Placeholder),
+    Image("png", "image/png", MediaCarrier.DataUri),
 }
 
 private enum class ChatExportAction { Save, Share }
@@ -286,6 +305,24 @@ fun ChatExportSheet(
                     ) {
                         Text(stringResource(R.string.chat_page_export_include_reasoning))
                     }
+                    if (format == ChatExportFormat.Markdown) {
+                        switchItem(
+                            checked = exportOptions.includeToolSteps,
+                            onCheckedChange = { exportOptions = exportOptions.copy(includeToolSteps = it) },
+                        ) {
+                            Text(stringResource(R.string.chat_page_export_include_tool_steps))
+                        }
+                        switchItem(
+                            checked = (exportOptions.media ?: format.defaultMedia) != MediaCarrier.Placeholder,
+                            onCheckedChange = { embed ->
+                                exportOptions = exportOptions.copy(
+                                    media = if (embed) MediaCarrier.DataUri else MediaCarrier.Placeholder
+                                )
+                            },
+                        ) {
+                            Text(stringResource(R.string.chat_page_export_embed_images))
+                        }
+                    }
                     if (format == ChatExportFormat.Image) {
                         switchItem(
                             checked = exportOptions.expandReasoning,
@@ -382,17 +419,75 @@ private suspend fun writeMarkdownExport(
     messages: List<UIMessage>,
     options: ExportOptions,
 ): File = withContext(Dispatchers.IO) {
-    val markdown = buildMarkdownExport(conversation, messages, options)
+    val markdown = buildMarkdownExport(conversation, messages, options, ChatExportFormat.Markdown)
     val file = context.appTempFolder.resolve(exportFileName(ChatExportFormat.Markdown))
     file.writeText(markdown)
     file
 }
 
+/**
+ * 把图片 part 解析成能直接塞进 `![](...)` 的字符串。
+ *
+ * 返回 null 表示该承载方式不写入图片数据（[MediaCarrier.Placeholder]，
+ * 或者 [MediaCarrier.Link] 但 url 本身就是 data URI —— 写出来还是膨胀）。
+ * 这里只管"源"，不含 Markdown 语法，将来 HTML 导出复用同一行结果。
+ */
+private fun UIMessagePart.Image.toMediaSource(carrier: MediaCarrier): String? = when (carrier) {
+    MediaCarrier.Placeholder -> null
+    MediaCarrier.DataUri -> encodeBase64().getOrNull()?.base64
+    MediaCarrier.Link -> url.takeIf { !it.startsWith("data:") }
+}
+
+/**
+ * 正文里偶尔会混进模型直接吐出来的 data URI（不在 Image part 里），
+ * 这类同样会把文件撑大，[MediaCarrier.Placeholder] 时一并抹成占位。
+ *
+ * 用扫描而不是正则：base64 允许换行，正则里的 `\s` 会一路吞到下一段内容。
+ * 只清理 image/video/audio，text 类的 data URI 体积有限且可能有语义，原样保留。
+ */
+private fun String.stripInlineMediaData(placeholder: String): String {
+    val mark = "data:"
+    val sep = ";base64,"
+    val out = StringBuilder(length)
+    var i = 0
+    while (true) {
+        val start = indexOf(mark, i)
+        if (start == -1) return out.append(this, i, length).toString()
+        val sepIndex = indexOf(sep, start)
+        if (sepIndex == -1) return out.append(this, i, length).toString()
+        val mime = substring(start + mark.length, sepIndex)
+        if (!mime.startsWith("image/") && !mime.startsWith("video/") && !mime.startsWith("audio/")) {
+            out.append(this, i, start + mark.length)
+            i = start + mark.length
+            continue
+        }
+        var end = sepIndex + sep.length
+        while (end < length) {
+            val c = this[end]
+            if (c == ')' || c == ']' || c == '"' || c == '\'') break
+            val isSpace = c == ' ' || c == '\t' || c == '\r' || c == '\n'
+            // base64 允许折行，但只有后面还接着 base64 字符时才算同一段，否则是正文
+            if (isSpace && (end + 1 >= length || !this[end + 1].isBase64Char())) break
+            end++
+        }
+        out.append(this, i, start).append(placeholder)
+        i = end
+    }
+}
+
+private fun Char.isBase64Char(): Boolean =
+    this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9' || this == '+' || this == '/' || this == '='
+
+private const val IMAGE_PLACEHOLDER = "[图片]"
+
 private fun buildMarkdownExport(
     conversation: Conversation,
     messages: List<UIMessage>,
     options: ExportOptions,
+    format: ChatExportFormat,
 ): String = buildString {
+    // 图片承载方式：选项没显式指定时跟随格式自带的默认值
+    val mediaCarrier = options.media ?: format.defaultMedia
     append("# ${conversation.title}\n\n")
     append("*Exported on ${LocalDateTime.now().toLocalString()}*\n\n")
 
@@ -402,12 +497,22 @@ private fun buildMarkdownExport(
         message.parts.forEach { part ->
             when (part) {
                 is UIMessagePart.Text -> {
-                    append(part.text)
+                    val text = if (mediaCarrier == MediaCarrier.Placeholder) {
+                        part.text.stripInlineMediaData(IMAGE_PLACEHOLDER)
+                    } else {
+                        part.text
+                    }
+                    append(text)
                     appendLine()
                 }
 
                 is UIMessagePart.Image -> {
-                    append("![Image](${part.encodeBase64().getOrNull()?.base64})")
+                    val source = part.toMediaSource(mediaCarrier)
+                    if (source != null) {
+                        append("![Image]($source)")
+                    } else {
+                        append(IMAGE_PLACEHOLDER)
+                    }
                     appendLine()
                 }
 
@@ -423,6 +528,7 @@ private fun buildMarkdownExport(
                 }
 
                 is UIMessagePart.Tool -> {
+                    if (!options.includeToolSteps) return@forEach
                     append("**Tool**: `${part.toolName}`")
                     appendLine()
                     if (part.toolCallId.isNotBlank()) {
@@ -463,7 +569,12 @@ private fun buildMarkdownExport(
                                 }
 
                                 is UIMessagePart.Image -> {
-                                    append("![Tool Image](${outputPart.encodeBase64().getOrNull()?.base64})")
+                                    val source = outputPart.toMediaSource(mediaCarrier)
+                                    if (source != null) {
+                                        append("![Tool Image]($source)")
+                                    } else {
+                                        append(IMAGE_PLACEHOLDER)
+                                    }
                                     appendLine()
                                 }
 
@@ -541,6 +652,10 @@ private suspend fun writeImageExport(
 data class ExportOptions(
     val includeReasoning: Boolean = true,
     val expandReasoning: Boolean = false,
+    /** 是否导出工具调用与搜索步骤（含 input/output） */
+    val includeToolSteps: Boolean = true,
+    /** 图片承载方式；null 表示跟随当前导出格式的 [ChatExportFormat.defaultMedia] */
+    val media: MediaCarrier? = null,
 )
 
 @Composable

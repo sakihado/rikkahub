@@ -1435,6 +1435,8 @@
   <string name="media_creation_page_copy_prompt">複製提示詞</string>
   <string name="media_creation_page_prompt_copied">提示詞已複製</string>
   <string name="chat_page_export_include_reasoning">匯出推理</string>
+  <string name="chat_page_export_include_tool_steps">匯出工具步驟</string>
+  <string name="chat_page_export_embed_images">內嵌圖片（檔案較大）</string>
   <string name="common_delete_confirm_message">您確定要刪除「%s」嗎？此操作無法復原。</string>
   <string name="media_creation_title">媒體創作</string>
   <string name="media_creation_notification_running">%1$d 個任務生成中</string>

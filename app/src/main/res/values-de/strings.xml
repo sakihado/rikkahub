@@ -270,6 +270,8 @@
   <string name="chat_page_export_image">Als Bild exportieren</string>
   <string name="chat_page_export_image_desc">Unterhaltung als PNG-Bild exportieren</string>
   <string name="chat_page_export_include_reasoning">Reasoning exportieren</string>
+  <string name="chat_page_export_include_tool_steps">Tool-Schritte exportieren</string>
+  <string name="chat_page_export_embed_images">Bilder einbetten (große Datei)</string>
   <string name="avatar_reset">Zurücksetzen</string>
   <string name="avatar_url_confirm">Bestätigen</string>
   <string name="avatar_url_dialog_title">Bild-URL eingeben</string>

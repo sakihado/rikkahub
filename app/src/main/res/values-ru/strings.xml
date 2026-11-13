@@ -1478,6 +1478,8 @@
   <string name="media_creation_page_prompt_placeholder">Опишите, что вы хотите сгенерировать</string>
   <string name="media_creation_page_select_model">Выбрать модель</string>
   <string name="chat_page_export_include_reasoning">Экспортировать рассуждения</string>
+  <string name="chat_page_export_include_tool_steps">Экспортировать шаги инструментов</string>
+  <string name="chat_page_export_embed_images">Встроить изображения (большой файл)</string>
   <string name="common_delete_confirm_message">Вы уверены, что хотите удалить \"%s\"? Это действие нельзя отменить.</string>
   <string name="media_creation_title">Создание медиа</string>
   <string name="media_creation_notification_running">Генерируется задач: %1$d</string>

@@ -270,6 +270,8 @@
   <string name="chat_page_export_image">导出为图片</string>
   <string name="chat_page_export_image_desc">将对话导出为PNG图片</string>
   <string name="chat_page_export_include_reasoning">导出思维过程</string>
+  <string name="chat_page_export_include_tool_steps">导出工具步骤</string>
+  <string name="chat_page_export_embed_images">内嵌图片（体积较大）</string>
   <string name="chat_page_export_image_expand_reasoning">展开思维过程</string>
   <string name="chat_page_export_markdown">Markdown</string>
   <string name="chat_page_export_markdown_desc">将对话导出为markdown文件</string>

@@ -1447,6 +1447,8 @@ mDNS 주소: .local 호스트네임을 사용하며, IP를 몰라도 같은 네�
   <string name="media_creation_page_saved_to_gallery">갤러리에 저장됨</string>
   <string name="media_creation_page_save_failed">저장하지 못했습니다</string>
   <string name="chat_page_export_include_reasoning">추론 내보내기</string>
+  <string name="chat_page_export_include_tool_steps">도구 단계 내보내기</string>
+  <string name="chat_page_export_embed_images">이미지 포함 (파일 용량 큼)</string>
   <string name="common_delete_confirm_message">\"%s\"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.</string>
   <string name="media_creation_title">미디어 생성</string>
   <string name="media_creation_notification_running">%1$d개 작업 생성 중</string>

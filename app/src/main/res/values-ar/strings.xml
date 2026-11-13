@@ -1415,6 +1415,8 @@
   <string name="media_creation_page_copy_prompt">نسخ المطالبة</string>
   <string name="media_creation_page_prompt_copied">تم نسخ المطالبة</string>
   <string name="chat_page_export_include_reasoning">تصدير الاستدلال</string>
+  <string name="chat_page_export_include_tool_steps">تصدير خطوات الأدوات</string>
+  <string name="chat_page_export_embed_images">تضمين الصور (ملف كبير)</string>
   <string name="common_delete_confirm_message">هل أنت متأكد من حذف \"%s\"؟ لا يمكن التراجع عن هذا الإجراء.</string>
   <string name="media_creation_title">إنشاء الوسائط</string>
   <string name="media_creation_notification_running">جارٍ توليد %1$d من المهام</string>
