@@ -31,6 +31,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.util.HistoryTrimStats
 import me.rerere.ai.util.inspectHistoryTrim
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Add01
@@ -54,7 +55,7 @@ fun TrimHistoryDialog(
     var currentJob by remember { mutableStateOf<Job?>(null) }
     val isLoading = currentJob?.isActive == true
 
-    val stats by produceState(initialValue = null, messages, provider) {
+    val stats by produceState<HistoryTrimStats?>(initialValue = null, messages, provider) {
         value = withContext(Dispatchers.IO) { messages.inspectHistoryTrim(provider) }
     }
 
