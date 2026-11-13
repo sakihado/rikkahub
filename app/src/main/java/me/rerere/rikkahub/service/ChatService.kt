@@ -1262,7 +1262,7 @@ class ChatService(
         val config = turn.assistant.autoTrimConfig()
         if (!config.isEnabled) return null
         val effectiveContext = contextTokens
-            ?.let { (it - trimmedBytes / BYTES_PER_TOKEN_ESTIMATE).coerceAtLeast(0) }
+            ?.let { (it - trimmedBytes / BYTES_PER_TOKEN_ESTIMATE).toInt().coerceAtLeast(0) }
         val window = session.state.value.currentMessages
             .limitContext(turn.assistant.contextMessageLimit)
             .filterNot { it.isContextCheckpoint }
