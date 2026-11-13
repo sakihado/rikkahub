@@ -145,6 +145,7 @@ fun ChatInput(
     runningBackgroundTasks: Int = 0,
     onShowBackgroundTasks: () -> Unit = {},
     workspaceHostAccess: Boolean = false,
+    onDisableWorkspaceHostAccess: () -> Unit = {},
     onStartVoiceMode: (() -> Unit)? = null,
     voiceState: VoiceSessionState = VoiceSessionState(),
     onStopVoiceMode: () -> Unit = {},
@@ -242,17 +243,29 @@ fun ChatInput(
             )
             if (workspaceHostAccess && assistant.workspaceId != null) {
                 Surface(
+                    onClick = onDisableWorkspaceHostAccess,
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.secondaryContainer,
                 ) {
-                    Text(
-                        text = stringResource(R.string.chat_host_access_chip),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Row(
+                        modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.chat_host_access_chip),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Icon(
+                            imageVector = HugeIcons.Cancel01,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
+                    }
                 }
             }
             Surface(

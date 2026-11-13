@@ -285,7 +285,6 @@ class WorkspaceDetailVM(
             }
         }
     }
-}
 
     fun setToolApproval(toolName: String, needsApproval: Boolean) {
         viewModelScope.launch {

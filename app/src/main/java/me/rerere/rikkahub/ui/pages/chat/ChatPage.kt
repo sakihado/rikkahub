@@ -408,6 +408,7 @@ private fun ChatPageContent(
                     runningBackgroundTasks = backgroundTasks.count { it.status == BackgroundShellStatus.RUNNING },
                     onShowBackgroundTasks = { showBackgroundTasks = true },
                     workspaceHostAccess = conversation.workspaceHostAccess,
+                    onDisableWorkspaceHostAccess = { vm.updateWorkspaceHostAccess(false) },
                     loading = loadingJob != null,
                     settings = setting,
                     assistant = assistant,

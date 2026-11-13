@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utime.h>
 
 #ifndef AT_FDCWD
 #define AT_FDCWD (-100)
@@ -411,12 +413,38 @@ FILE *fopen64(const char *pathname, const char *mode) {
     return real_fn(pathname, mode);
 }
 
+static int check_ro_fd(int fd) {
+    if (g_in_hook || fd < 0) return 0;
+    g_in_hook = 1;
+    char fd_link[64];
+    char target[PATH_MAX];
+    int blocked = 0;
+    snprintf(fd_link, sizeof(fd_link), "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(fd_link, target, sizeof(target) - 1);
+    if (n > 0) {
+        target[n] = '\0';
+        blocked = is_protected_sdcard_path(target);
+    }
+    g_in_hook = 0;
+    return blocked;
+}
+
+/* 绕过 glibc 头文件中 __attribute__((nonnull)) 在 -O2 下消除防御性 NULL 检查与告警 */
+static int ptr_present(const void *volatile p) {
+    return (uintptr_t)p != 0;
+}
+
 FILE *freopen(const char *pathname, const char *mode, FILE *stream) {
     static freopen_fn_t real_fn = NULL;
     if (!real_fn) real_fn = (freopen_fn_t)dlsym(RTLD_NEXT, "freopen");
-    if (pathname && is_write_fopen_mode(mode) && check_ro_at(AT_FDCWD, pathname, 1)) {
-        errno = EROFS;
-        return NULL;
+    if (is_write_fopen_mode(mode)) {
+        int blocked = ptr_present(pathname)
+            ? check_ro_at(AT_FDCWD, pathname, 1)
+            : (ptr_present(stream) ? check_ro_fd(fileno(stream)) : 0);
+        if (blocked) {
+            errno = EROFS;
+            return NULL;
+        }
     }
     return real_fn(pathname, mode, stream);
 }
@@ -424,9 +452,14 @@ FILE *freopen(const char *pathname, const char *mode, FILE *stream) {
 FILE *freopen64(const char *pathname, const char *mode, FILE *stream) {
     static freopen_fn_t real_fn = NULL;
     if (!real_fn) real_fn = (freopen_fn_t)dlsym(RTLD_NEXT, "freopen64");
-    if (pathname && is_write_fopen_mode(mode) && check_ro_at(AT_FDCWD, pathname, 1)) {
-        errno = EROFS;
-        return NULL;
+    if (is_write_fopen_mode(mode)) {
+        int blocked = ptr_present(pathname)
+            ? check_ro_at(AT_FDCWD, pathname, 1)
+            : (ptr_present(stream) ? check_ro_fd(fileno(stream)) : 0);
+        if (blocked) {
+            errno = EROFS;
+            return NULL;
+        }
     }
     return real_fn(pathname, mode, stream);
 }
@@ -656,4 +689,53 @@ int fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flag
         return -1;
     }
     return real_fn(dirfd, pathname, owner, group, flags);
+}
+
+/* ==================== utimensat / utimes / lutimes / utime ==================== */
+
+typedef int (*utimensat_fn_t)(int, const char *, const struct timespec[2], int);
+typedef int (*utimes_fn_t)(const char *, const struct timeval[2]);
+typedef int (*utime_fn_t)(const char *, const struct utimbuf *);
+
+int utimensat(int dirfd, const char *pathname, const struct timespec times[2], int flags) {
+    static utimensat_fn_t real_fn = NULL;
+    if (!real_fn) real_fn = (utimensat_fn_t)dlsym(RTLD_NEXT, "utimensat");
+    int blocked = ptr_present(pathname)
+        ? check_ro_at(dirfd, pathname, (flags & AT_SYMLINK_NOFOLLOW) ? 0 : 1)
+        : check_ro_fd(dirfd);
+    if (blocked) {
+        errno = EROFS;
+        return -1;
+    }
+    return real_fn(dirfd, pathname, times, flags);
+}
+
+int utimes(const char *filename, const struct timeval times[2]) {
+    static utimes_fn_t real_fn = NULL;
+    if (!real_fn) real_fn = (utimes_fn_t)dlsym(RTLD_NEXT, "utimes");
+    if (check_ro_at(AT_FDCWD, filename, 1)) {
+        errno = EROFS;
+        return -1;
+    }
+    return real_fn(filename, times);
+}
+
+int lutimes(const char *filename, const struct timeval tv[2]) {
+    static utimes_fn_t real_fn = NULL;
+    if (!real_fn) real_fn = (utimes_fn_t)dlsym(RTLD_NEXT, "lutimes");
+    if (check_ro_at(AT_FDCWD, filename, 0)) {
+        errno = EROFS;
+        return -1;
+    }
+    return real_fn(filename, tv);
+}
+
+int utime(const char *filename, const struct utimbuf *times) {
+    static utime_fn_t real_fn = NULL;
+    if (!real_fn) real_fn = (utime_fn_t)dlsym(RTLD_NEXT, "utime");
+    if (check_ro_at(AT_FDCWD, filename, 1)) {
+        errno = EROFS;
+        return -1;
+    }
+    return real_fn(filename, times);
 }

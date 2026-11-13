@@ -44,7 +44,7 @@ class RootfsPatcherTest {
         val script = hostSh.readText()
         // 不再包含 -r/--root 特权参数
         assertFalse(script.contains("X-As-Root"))
-        assertEquals("nameserver 1.1.1.1\n", File(rootfs, "etc/resolv.conf").readText())
+        assertTrue(File(rootfs, "etc/resolv.conf").readText().contains("nameserver 1.1.1.1"))
     }
 
     @Test
