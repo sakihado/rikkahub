@@ -30,6 +30,15 @@ Material 3 look (cards with dividers, plain forms).
 ./gradlew spotlessCheck          # 只检查格式不改文件
 ```
 
+### Fast Local Verification (AI Agents)
+
+When verifying code changes locally, prefer fast, incremental checks instead of full Release/Lint builds:
+
+1. `./gradlew spotlessCheck` — check formatting/imports on modified files
+2. `./gradlew :app:compileGithubDebugKotlin` — catch Kotlin/Compose/KSP compilation errors without full APK packaging
+3. Run targeted JVM unit tests for the module(s) or test classes you touched (e.g. `./gradlew :ai:testDebugUnitTest`, `./gradlew :app:testGithubDebugUnitTest --tests "..."`)
+4. **Do not** run `assembleGithubRelease` or `bundlePlayRelease` in constrained/PRoot environments (R8 minification requires high physical RAM); leave Release builds and full Lint to CI. If `/workspace/LOCAL_BUILD.md` exists in the parent workspace, follow its container-specific flags (e.g. `taskset -c 4-7`).
+
 App 有一个 `distribution` 维度的 product flavor：`github`（默认）和 `play`，共用同一个 applicationId。
 渠道差异用 `BuildConfig.IS_PLAY_STORE` 判断（如 Play 版不检查更新、不显示更新提醒）。
 
