@@ -107,6 +107,9 @@ data class GoogleThoughtMetadata(
     val signatureOrigin: String? = null,
     @SerialName("is_thought")
     val isThought: Boolean? = null,
+    // 原始 part 没有 text 等载荷字段。null 表示旧记录，保留旧版的空 text 回放行为。
+    @SerialName("google_signature_only")
+    val signatureOnly: Boolean? = null,
 ) : PartMetadata
 
 /**

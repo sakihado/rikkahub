@@ -9,8 +9,8 @@ import kotlinx.coroutines.channels.onFailure
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
@@ -41,12 +41,12 @@ import me.rerere.ai.provider.ModelType
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderQuota
 import me.rerere.ai.provider.ProviderSetting
-import me.rerere.ai.provider.TextGenerationResult
 import me.rerere.ai.provider.TextGenerationParams
-import me.rerere.ai.provider.runQuotaQuery
+import me.rerere.ai.provider.TextGenerationResult
 import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.google.vertex.ServiceAccountTokenProvider
 import me.rerere.ai.provider.providers.groupPartsByToolBoundary
+import me.rerere.ai.provider.runQuotaQuery
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.GoogleFileDataMetadata
@@ -100,17 +100,6 @@ internal fun ProviderSetting.Google.thoughtSignatureOrigin(): String = when {
         val host = runCatching { baseUrl.trim().toHttpUrl().host }.getOrDefault(baseUrl.trim())
         "google:${id}:$host"
     }
-}
-
-private data class ThoughtReplayContext(
-    val currentOrigin: String? = null,
-    val policy: GoogleCrossChannelThoughtPolicy = GoogleCrossChannelThoughtPolicy.PASSTHROUGH,
-) {
-    fun isAdaptationEnabled(): Boolean =
-        currentOrigin != null && policy != GoogleCrossChannelThoughtPolicy.PASSTHROUGH
-
-    fun isForeignOrUnknown(origin: String?): Boolean =
-        isAdaptationEnabled() && origin != currentOrigin
 }
 
 class GoogleProvider(private val client: OkHttpClient, context: Context? = null) : Provider<ProviderSetting.Google> {
@@ -566,9 +555,14 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         if (useFunctionTools && useBuiltInTools) {
             when (compatMode) {
                 GoogleBuiltInToolCompatMode.STANDARD -> {
-                    put("toolConfig", buildJsonObject {
-                        put("includeServerSideToolInvocations", true)
-                    })
+                    // Vertex currently returns opaque search-invocation signatures that it
+                    // rejects on replay. Its mixed-tool path works without this opt-in.
+                    // Developer API / gateways retain their existing required flag.
+                    if (providerSetting?.vertexAI != true) {
+                        put("toolConfig", buildJsonObject {
+                            put("includeServerSideToolInvocations", true)
+                        })
+                    }
                 }
 
                 GoogleBuiltInToolCompatMode.SNAKE_CASE_TOOL_CONFIG -> {
@@ -787,7 +781,8 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 )
             }
 
-            jsonObject.containsKey("thoughtSignature") -> {
+            jsonObject.containsKey("thoughtSignature") &&
+                jsonObject.keys.all { it == "thoughtSignature" || it == "thought" } -> {
                 val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
                 val metadata = jsonObject.toGoogleThoughtMetadata(
                     signatureOrigin = signatureOrigin,
@@ -826,7 +821,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
                 .forEach { message ->
                     if (message.role == MessageRole.ASSISTANT) {
-                        addModelMessage(message, replayContext)
+                        addModelMessage(message, replayContext.forMessage(message))
                     } else {
                         addUserMessage(message, replayContext)
                     }
@@ -913,7 +908,12 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 null
             } else {
                 buildJsonObject {
-                    put("text", text)
+                    // Preserve the difference between {signature} and {text:"", signature}.
+                    // Old records have no marker and retain their previous explicit-text form.
+                    if (thoughtMeta?.signatureOnly != true || text.isNotEmpty()) put("text", text)
+                    if (thoughtMeta?.signatureOnly == true) {
+                        thoughtMeta.isThought?.let { put("thought", it) }
+                    }
                     signature?.let { put("thoughtSignature", it) }
                 }
             }
@@ -923,7 +923,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             val thoughtMeta = metadataAs<GoogleThoughtMetadata>()
             val isForeign = replayContext.isForeignOrUnknown(thoughtMeta?.signatureOrigin)
             if (isForeign) {
-                when (replayContext.policy) {
+                when (replayContext.effectivePolicy) {
                     GoogleCrossChannelThoughtPolicy.SKIP_FOREIGN_THOUGHT_AND_BYPASS_TOOLS -> null
                     GoogleCrossChannelThoughtPolicy.STRIP_SIGNATURE_KEEP_THOUGHT_TEXT -> {
                         reasoning.takeIf { it.isNotBlank() }?.let {
@@ -946,7 +946,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     null
                 } else {
                     buildJsonObject {
-                        put("text", reasoning)
+                        if (thoughtMeta?.signatureOnly != true || reasoning.isNotEmpty()) put("text", reasoning)
                         put("thought", true)
                         signature?.let { put("thoughtSignature", it) }
                     }
@@ -1119,12 +1119,19 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     private fun UIMessagePart.ServerTool.toGoogleServerToolParts(
         replayContext: ThoughtReplayContext = ThoughtReplayContext(),
     ): List<JsonObject> {
+        if (replayContext.ignoreSignatures) {
+            return output?.let { result ->
+                listOf(buildJsonObject {
+                    put("text", "[Previous server tool result: $toolName]\n$result")
+                })
+            }.orEmpty()
+        }
+
         val metadata = metadataAs<ServerToolMetadata>()
         val protocol = metadata?.protocol
         if (protocol != null && protocol != ServerToolProtocol.GOOGLE_GENERATE_CONTENT) {
             return emptyList()
         }
-
         val stripForeignSignature = replayContext.isForeignOrUnknown(metadata?.signatureOrigin)
         return buildList {
             metadata?.call?.let { add(if (stripForeignSignature) it.stripThoughtSignature() else it) }
@@ -1141,17 +1148,28 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         signatureOrigin: String? = null,
         isThought: Boolean? = null,
     ): JsonObject? {
-        val signature = this["thoughtSignature"]?.jsonPrimitive?.contentOrNull ?: return null
+        val signature = this["thoughtSignature"]?.jsonPrimitive?.contentOrNull
+        // Provenance belongs to the whole response, not just its signed parts.
+        if (signature == null && signatureOrigin == null) return null
         return GoogleThoughtMetadata(
             thoughtSignature = signature,
             signatureOrigin = signatureOrigin,
             isThought = isThought,
+            signatureOnly = signature?.let {
+                when {
+                    keys.all { key -> key == "thoughtSignature" || key == "thought" } -> true
+                    containsKey("text") -> false
+                    else -> null // Typed image/function parts already retain their payload type.
+                }
+            },
         ).toMetadata()
     }
 
     private fun enhanceGoogleErrorMessage(message: String): String {
         return if (message.contains("include_server_side_tool_invocations", ignoreCase = true)) {
             "$message\n提示：当前渠道不支持直接混用模型内置工具与函数调用，可在 Google 提供商设置中调整「内置工具与函数工具兼容」选项（如切换为「优先函数工具」或「snake_case 字段」）。"
+        } else if (message.contains("invalid thought signature", ignoreCase = true)) {
+            "$message\n提示：可在出问题的助手回复的更多菜单中选择「忽略本条思考签名」，保留原文后重试；该操作可恢复。"
         } else {
             message
         }

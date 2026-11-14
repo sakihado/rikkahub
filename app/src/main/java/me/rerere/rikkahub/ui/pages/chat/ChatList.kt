@@ -52,8 +52,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
-import kotlin.math.roundToInt
-import kotlin.uuid.Uuid
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.rerere.ai.ui.UIMessage
@@ -69,6 +67,8 @@ import me.rerere.rikkahub.ui.hooks.ImeLazyListAutoScroller
 import me.rerere.rikkahub.ui.theme.ChatFontProvider
 import me.rerere.rikkahub.utils.plus
 import me.rerere.ui.components.ListSelectableItem
+import kotlin.math.roundToInt
+import kotlin.uuid.Uuid
 
 private const val TAG = "ChatList"
 private const val LoadingIndicatorKey = "LoadingIndicator"
@@ -98,6 +98,7 @@ fun ChatList(
     onUpdateMessage: (MessageNode) -> Unit = {},
     onRestoreAttachment: ((Uuid, Int) -> Unit)? = null,
     onRestoreTrimmedTool: ((Uuid, String) -> Unit)? = null,
+    onSetGoogleThoughtSignaturesIgnored: ((Uuid, Boolean) -> Unit)? = null,
     onClickSuggestion: (String) -> Unit = {},
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)? = null,
     onClearTranslation: (UIMessage) -> Unit = {},
@@ -160,6 +161,7 @@ fun ChatList(
                 onUpdateMessage = onUpdateMessage,
                 onRestoreAttachment = onRestoreAttachment,
                 onRestoreTrimmedTool = onRestoreTrimmedTool,
+                onSetGoogleThoughtSignaturesIgnored = onSetGoogleThoughtSignaturesIgnored,
                 onClickSuggestion = onClickSuggestion,
                 onTranslate = onTranslate,
                 onClearTranslation = onClearTranslation,
@@ -234,6 +236,7 @@ private fun ChatListNormal(
     onUpdateMessage: (MessageNode) -> Unit,
     onRestoreAttachment: ((Uuid, Int) -> Unit)?,
     onRestoreTrimmedTool: ((Uuid, String) -> Unit)?,
+    onSetGoogleThoughtSignaturesIgnored: ((Uuid, Boolean) -> Unit)?,
     onClickSuggestion: (String) -> Unit,
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)?,
     onClearTranslation: (UIMessage) -> Unit,
@@ -399,6 +402,10 @@ private fun ChatListNormal(
                             onRestoreTrimmedTool = onRestoreTrimmedTool?.let { callback ->
                                 { toolCallId -> callback(node.currentMessage.id, toolCallId) }
                             },
+                            onSetGoogleThoughtSignaturesIgnored = onSetGoogleThoughtSignaturesIgnored
+                                ?.takeUnless { loading }?.let { callback ->
+                                    { ignored -> callback(node.currentMessage.id, ignored) }
+                                },
                             isFavorite = node.isFavorite,
                             onToggleFavorite = {
                                 onToggleFavorite?.invoke(node)

@@ -26,6 +26,8 @@ data class UIMessage(
     val modelId: Uuid? = null,
     // 模型名称的快照：modelId 指向的模型被删除后，靠它继续显示这条消息由谁生成
     val modelSnapshot: ModelSnapshot? = null,
+    // 仅在 Google 请求回放时忽略本条回复的签名；保留原始 parts，可恢复。
+    val ignoreGoogleThoughtSignatures: Boolean = false,
     val usage: TokenUsage? = null,
     // 模型实际生成耗时（各步从首个 chunk 到响应结束的累计），不含首 token 延迟、工具执行和审批等待
     val generationTimeMs: Long? = null,

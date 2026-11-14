@@ -318,6 +318,15 @@ internal class InteractionsAPI(
                 is PartGroup.Content -> group.parts.forEach { part ->
                     when (part) {
                         is UIMessagePart.Reasoning -> {
+                            if (message.ignoreGoogleThoughtSignatures) {
+                                if (part.reasoning.isNotBlank()) {
+                                    contentBuffer.add(buildJsonObject {
+                                        put("type", "text")
+                                        put("text", "[Thought]\n${part.reasoning}")
+                                    })
+                                }
+                                return@forEach
+                            }
                             // 没有 Interactions 签名的思考来自其他协议，无法作为 thought step 回传
                             val signature = part.metadataAs<GoogleInteractionsMetadata>()?.signature
                                 ?: return@forEach
@@ -337,6 +346,15 @@ internal class InteractionsAPI(
                         }
 
                         is UIMessagePart.ServerTool -> {
+                            if (message.ignoreGoogleThoughtSignatures) {
+                                part.output?.let { output ->
+                                    contentBuffer.add(buildJsonObject {
+                                        put("type", "text")
+                                        put("text", "[Previous server tool result: ${part.toolName}]\n$output")
+                                    })
+                                }
+                                return@forEach
+                            }
                             val steps = part.toInteractionsServerToolSteps()
                             if (steps.isNotEmpty()) {
                                 flushContent()
@@ -360,8 +378,10 @@ internal class InteractionsAPI(
                             put("id", tool.toolCallId)
                             put("name", tool.toolName)
                             put("arguments", tool.inputAsJson())
-                            tool.metadataAs<GoogleInteractionsMetadata>()?.signature?.let {
-                                put("signature", it)
+                            if (!message.ignoreGoogleThoughtSignatures) {
+                                tool.metadataAs<GoogleInteractionsMetadata>()?.signature?.let {
+                                    put("signature", it)
+                                }
                             }
                         })
                     }

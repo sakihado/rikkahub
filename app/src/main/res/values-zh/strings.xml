@@ -1927,7 +1927,7 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_provider_google_builtin_tool_compat_standard">标准</string>
   <string name="setting_provider_google_builtin_tool_compat_snake_case">snake_case</string>
   <string name="setting_provider_google_builtin_tool_compat_prefer_tools">优先工具</string>
-  <string name="setting_provider_google_builtin_tool_compat_standard_desc">同时启用内置工具与函数工具时，按标准格式发送 toolConfig.includeServerSideToolInvocations。</string>
+  <string name="setting_provider_google_builtin_tool_compat_standard_desc">按 API 自动适配：Gemini Developer API 和兼容中转站请求服务端工具调用明细；Vertex AI 不主动请求，避免搜索中间签名回传错误。</string>
   <string name="setting_provider_google_builtin_tool_compat_snake_case_desc">改为发送 tool_config.include_server_side_tool_invocations，适配仅识别蛇形命名的中转站。</string>
   <string name="setting_provider_google_builtin_tool_compat_prefer_tools_desc">存在函数工具时自动跳过内置工具（若开启了联网搜索，会自动回退为外部搜索工具）。</string>
   <string name="setting_provider_google_thought_signature_policy">跨渠道思考签名处理</string>
@@ -1937,4 +1937,9 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="setting_provider_google_thought_signature_skip_foreign_desc">对话中切换渠道（如中转/AI Studio 切到 Vertex）时跳过其他渠道思考块，并为工具调用填充校验跳过标记（推荐）。</string>
   <string name="setting_provider_google_thought_signature_keep_text_desc">剥离其他渠道思考签名并转为普通文本保留，同时为工具调用填充校验跳过标记。</string>
   <string name="setting_provider_google_thought_signature_passthrough_desc">不做跨渠道清洗，始终原样回传历史消息里的 thoughtSignature。</string>
+  <string name="chat_message_ignore_google_signatures">忽略本条思考签名</string>
+  <string name="chat_message_restore_google_signatures">恢复本条思考签名</string>
+  <string name="chat_message_google_signatures_ignored">已忽略本条回复的 Gemini 思考签名</string>
+  <string name="chat_message_signature_blocked_generating">请先停止生成，再修改思考签名回传设置。</string>
+  <string name="chat_message_ignore_google_signatures_description">仅后续 Google/Gemini 请求会忽略本条回复的签名，并把可读思考摘要作为普通文本保留。本地原文和签名不会删除，工具历史可能失去部分推理上下文。之后可恢复签名回传，不会自动重发请求。</string>
 </resources>

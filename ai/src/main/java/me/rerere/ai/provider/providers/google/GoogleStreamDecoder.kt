@@ -20,6 +20,7 @@ import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.json
 import me.rerere.common.http.jsonPrimitiveOrNull
@@ -150,7 +151,8 @@ internal class GoogleStreamDecoder(
                 )
             }
         }
-        part.containsKey("thoughtSignature") -> {
+        part.containsKey("thoughtSignature") &&
+                part.keys.all { it == "thoughtSignature" || it == "thought" } -> {
             val thought = part["thought"]?.jsonPrimitive?.booleanOrNull == true
             val metadata = part.toGoogleThoughtMetadata(isThought = thought.takeIf { it })
             if (thought) {
@@ -200,11 +202,14 @@ internal class GoogleStreamDecoder(
                 when (part) {
                     is UIMessagePart.Text -> if (part.text.isNotEmpty()) {
                         addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
+                        val signed = part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
+                        if (signed) addAll(closeText())
                         val id = textId ?: nextId(responseId, "text").also {
                             textId = it; add(StreamChunk.TextStart(it, part.metadata))
                         }
                         add(StreamChunk.TextDelta(id, part.text, part.metadata))
-                    } else if (part.metadata != null) {
+                        if (signed) addAll(closeText())
+                    } else if (part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null) {
                         // 纯签名占位 part 独立发出，不合并到前一个文本 part 上
                         addAll(closeText()); addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
                         val id = nextId(responseId, "text")
@@ -212,14 +217,18 @@ internal class GoogleStreamDecoder(
                         add(StreamChunk.TextDelta(id, "", part.metadata))
                         add(StreamChunk.TextEnd(id))
                     }
-                    is UIMessagePart.Reasoning -> if (part.reasoning.isNotEmpty() || part.metadata != null) {
+                    is UIMessagePart.Reasoning -> if (
+                        part.reasoning.isNotEmpty() || part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
+                    ) {
                         addAll(closeText()); addAll(closeImage()); addAll(closeTools())
+                        val signed = part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
+                        if (signed) addAll(closeReasoning())
                         val isNew = reasoningId == null
                         val id = reasoningId ?: nextId(responseId, "reasoning").also {
                             reasoningId = it; add(StreamChunk.ReasoningStart(it, part.metadata))
                         }
                         add(StreamChunk.ReasoningDelta(id, part.reasoning, part.metadata))
-                        if (isNew && part.reasoning.isEmpty() && part.finishedAt != null) {
+                        if (signed || (isNew && part.reasoning.isEmpty() && part.finishedAt != null)) {
                             addAll(closeReasoning())
                         }
                     }
@@ -294,11 +303,19 @@ internal class GoogleStreamDecoder(
     }
 
     private fun JsonObject.toGoogleThoughtMetadata(isThought: Boolean? = null): JsonObject? {
-        val signature = this["thoughtSignature"]?.jsonPrimitive?.contentOrNull ?: return null
+        val signature = this["thoughtSignature"]?.jsonPrimitive?.contentOrNull
+        if (signature == null && signatureOrigin == null) return null
         return GoogleThoughtMetadata(
             thoughtSignature = signature,
             signatureOrigin = signatureOrigin,
             isThought = isThought,
+            signatureOnly = signature?.let {
+                when {
+                    keys.all { key -> key == "thoughtSignature" || key == "thought" } -> true
+                    containsKey("text") -> false
+                    else -> null // Typed image/function parts already retain their payload type.
+                }
+            },
         ).toMetadata()
     }
 }

@@ -1,9 +1,11 @@
 package me.rerere.rikkahub.data.model
 
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.finishPendingTools
+import me.rerere.ai.ui.hasGoogleThoughtSignatures
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
@@ -109,3 +111,15 @@ private fun cancelToolByUser(tool: UIMessagePart.Tool): UIMessagePart.Tool = too
     // 执行到一半被停止的工具，耗时算到取消为止
     finishedAt = tool.finishedAt ?: tool.startedAt?.let { Clock.System.now() },
 )
+
+/** Recovery is a replay preference, not deletion of persisted signatures or content. */
+internal fun Conversation.withGoogleThoughtSignaturesIgnored(messageId: Uuid, ignored: Boolean): Conversation =
+    updateMessageById(messageId) { message ->
+        if (message.role != MessageRole.ASSISTANT ||
+            (ignored && !message.hasGoogleThoughtSignatures())
+        ) {
+            message
+        } else {
+            message.copy(ignoreGoogleThoughtSignatures = ignored)
+        }
+    }

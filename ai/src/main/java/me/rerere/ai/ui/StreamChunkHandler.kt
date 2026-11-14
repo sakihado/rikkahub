@@ -103,7 +103,7 @@ class StreamChunkHandler(private val model: Model? = null) {
                             index,
                             text.copy(
                                 text = text.text + chunk.text,
-                                metadata = chunk.metadata ?: text.metadata,
+                                metadata = mergeMetadata(text.metadata, chunk.metadata),
                             )
                         )
                     })
@@ -140,7 +140,7 @@ class StreamChunkHandler(private val model: Model? = null) {
                         val reasoning = get(index) as UIMessagePart.Reasoning
                         set(index, reasoning.copy(
                             reasoning = reasoning.reasoning + chunk.text,
-                            metadata = chunk.metadata ?: reasoning.metadata,
+                            metadata = mergeMetadata(reasoning.metadata, chunk.metadata),
                             reasoningType = chunk.reasoningType,
                         ))
                     })
@@ -156,7 +156,7 @@ class StreamChunkHandler(private val model: Model? = null) {
                         val reasoning = get(index) as UIMessagePart.Reasoning
                         set(index, reasoning.copy(
                             finishedAt = Clock.System.now(),
-                            metadata = chunk.metadata ?: reasoning.metadata,
+                            metadata = mergeMetadata(reasoning.metadata, chunk.metadata),
                         ))
                     })
                 }
@@ -374,7 +374,9 @@ private fun UIMessage.appendMessage(delta: UIMessage): UIMessage {
                     if (deltaPart.metadata != null) acc + deltaPart else acc
                 } else {
                     val lastPart = acc.lastOrNull()
-                    if (lastPart is UIMessagePart.Text && lastPart.text.isNotEmpty() && lastPart.metadata == null) {
+                    if (lastPart is UIMessagePart.Text && lastPart.text.isNotEmpty() &&
+                        lastPart.metadata == null && deltaPart.metadata == null
+                    ) {
                         acc.dropLast(1) + lastPart.copy(
                             text = lastPart.text + deltaPart.text,
                             metadata = deltaPart.metadata ?: lastPart.metadata,

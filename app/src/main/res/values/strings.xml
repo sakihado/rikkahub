@@ -1925,7 +1925,7 @@
   <string name="setting_provider_google_builtin_tool_compat_standard">Standard</string>
   <string name="setting_provider_google_builtin_tool_compat_snake_case">snake_case</string>
   <string name="setting_provider_google_builtin_tool_compat_prefer_tools">Tools Only</string>
-  <string name="setting_provider_google_builtin_tool_compat_standard_desc">Send toolConfig.includeServerSideToolInvocations=true when built-in tools and function tools are both enabled.</string>
+  <string name="setting_provider_google_builtin_tool_compat_standard_desc">Automatically adapt to the API: request server-side tool invocations for Gemini Developer API and compatible proxies; omit this option for Vertex AI.</string>
   <string name="setting_provider_google_builtin_tool_compat_snake_case_desc">Send snake_case tool_config.include_server_side_tool_invocations=true for proxies that reject camelCase.</string>
   <string name="setting_provider_google_builtin_tool_compat_prefer_tools_desc">Skip Google built-in tools whenever function tools are present (falls back to external search if enabled).</string>
   <string name="setting_provider_google_thought_signature_policy">Cross-channel thought signature</string>
@@ -1935,4 +1935,9 @@
   <string name="setting_provider_google_thought_signature_skip_foreign_desc">When switching channels (e.g. proxy/AI Studio to Vertex AI), omit foreign thinking blocks and bypass validation on foreign tool calls.</string>
   <string name="setting_provider_google_thought_signature_keep_text_desc">Keep foreign thinking text as plain text without signature, and bypass validation on foreign tool calls.</string>
   <string name="setting_provider_google_thought_signature_passthrough_desc">Always replay original thought signatures across channels without adaptation.</string>
+  <string name="chat_message_ignore_google_signatures">Ignore thought signatures for this reply</string>
+  <string name="chat_message_restore_google_signatures">Restore thought signatures for this reply</string>
+  <string name="chat_message_google_signatures_ignored">Gemini signatures ignored for this reply</string>
+  <string name="chat_message_signature_blocked_generating">Stop generation before changing signature replay.</string>
+  <string name="chat_message_ignore_google_signatures_description">Future Google/Gemini requests will omit signatures from this reply and keep readable thoughts as ordinary text. Local content is not deleted. Tool history may lose some reasoning context. You can restore signature replay later. No request is sent automatically.</string>
 </resources>

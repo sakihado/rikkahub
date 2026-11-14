@@ -40,7 +40,7 @@ enum class ClaudePromptCacheTtl(val apiValue: String?) {
  */
 @Serializable
 enum class GoogleBuiltInToolCompatMode {
-    /** 标准模式：携带 toolConfig.includeServerSideToolInvocations = true */
+    /** 按 API 适配：Developer API/代理请求服务端调用明细，Vertex 不主动请求 */
     @SerialName("standard")
     STANDARD,
 

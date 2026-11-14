@@ -44,7 +44,7 @@ class GoogleCompatAndThoughtSignatureTest {
     private val provider = GoogleProvider(OkHttpClient())
 
     @Test
-    fun `stream decoder handles standalone thoughtSignature part without crashing and replays with empty text`() {
+    fun `stream decoder handles standalone thoughtSignature and preserves its original shape`() {
         val vertexSetting = ProviderSetting.Google(
             id = Uuid.random(),
             vertexAI = true,
@@ -101,12 +101,12 @@ class GoogleCompatAndThoughtSignatureTest {
         assertEquals("CAISpAM_SIG_TAIL", textParts[1].metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
         assertEquals(origin, textParts[1].metadataAs<GoogleThoughtMetadata>()?.signatureOrigin)
 
-        // Same Vertex channel replays the standalone signature part with explicit text=""
+        // Do not invent a text payload for an originally signature-only part.
         val body = invokeBuildRequestBody(messages, TextGenerationParams(model = toolModel()), vertexSetting)
         val modelParts = body["contents"]!!.jsonArray[1].jsonObject["parts"]!!.jsonArray
         assertEquals(2, modelParts.size)
         assertEquals("Hello world", modelParts[0].jsonObject["text"]!!.jsonPrimitive.content)
-        assertEquals("", modelParts[1].jsonObject["text"]!!.jsonPrimitive.content)
+        assertFalse(modelParts[1].jsonObject.containsKey("text"))
         assertEquals("CAISpAM_SIG_TAIL", modelParts[1].jsonObject["thoughtSignature"]!!.jsonPrimitive.content)
     }
 

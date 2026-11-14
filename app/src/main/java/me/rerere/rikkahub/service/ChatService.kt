@@ -4,6 +4,12 @@ import android.app.Application
 import android.util.Log
 import androidx.annotation.StringRes
 import androidx.core.net.toUri
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -89,6 +95,7 @@ import me.rerere.rikkahub.data.model.toMessageNode
 import me.rerere.rikkahub.data.model.trimHistoryOutputs
 import me.rerere.rikkahub.data.model.updateMessageById
 import me.rerere.rikkahub.data.model.withAssistantUpdate
+import me.rerere.rikkahub.data.model.withGoogleThoughtSignaturesIgnored
 import me.rerere.rikkahub.data.model.withNodeFavorite
 import me.rerere.rikkahub.data.model.withToolApproval
 import me.rerere.rikkahub.data.model.withTranslation
@@ -100,12 +107,6 @@ import me.rerere.rikkahub.hostshell.HostPrivilegeManager
 import me.rerere.rikkahub.hostshell.ShellApprovalStore
 import me.rerere.rikkahub.web.BadRequestException
 import me.rerere.rikkahub.web.NotFoundException
-import java.net.ConnectException
-import java.net.NoRouteToHostException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatService"
@@ -1727,6 +1728,22 @@ class ChatService(
     }
 
     // ---- 消息操作 ----
+
+    suspend fun setGoogleThoughtSignaturesIgnored(
+        conversationId: Uuid,
+        messageId: Uuid,
+        ignored: Boolean,
+    ): Result<Unit> = runCatching {
+        withLoadedSession<Unit>(conversationId) { session ->
+            session.update { latest ->
+                check(!session.isGenerating) {
+                    context.getString(R.string.chat_message_signature_blocked_generating)
+                }
+                latest.withGoogleThoughtSignaturesIgnored(messageId, ignored)
+            }
+            session.flush()
+        }
+    }
 
     suspend fun editMessage(
         conversationId: Uuid,

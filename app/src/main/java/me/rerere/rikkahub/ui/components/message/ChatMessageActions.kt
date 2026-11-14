@@ -17,8 +17,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.SegmentedListItem
-import androidx.compose.material3.Text
 import androidx.compose.material3.SheetValue
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEachIndexed
+import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.datetime.toJavaLocalDateTime
 import me.rerere.ai.core.MessageRole
@@ -65,7 +66,6 @@ import me.rerere.rikkahub.utils.removeBracketedContent
 import me.rerere.rikkahub.utils.toLocalString
 import me.rerere.rikkahub.utils.toMessageTimeString
 import me.rerere.ui.components.RikkaConfirmDialog
-import java.util.Locale
 
 @Composable
 fun ColumnScope.ChatMessageActionButtons(
@@ -265,6 +265,7 @@ fun ChatMessageActionsSheet(
     onSelectAndCopy: () -> Unit,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
+    onToggleGoogleThoughtSignatures: (() -> Unit)? = null,
     onWebViewPreview: () -> Unit,
     onDismissRequest: () -> Unit
 ) {
@@ -292,6 +293,18 @@ fun ChatMessageActionsSheet(
                             else R.string.chat_message_add_favorite
                         ),
                         onClick = onToggleFavorite,
+                    )
+                )
+            }
+            if (onToggleGoogleThoughtSignatures != null) {
+                add(
+                    MessageSheetAction(
+                        icon = HugeIcons.Refresh03,
+                        label = stringResource(
+                            if (message.ignoreGoogleThoughtSignatures) R.string.chat_message_restore_google_signatures
+                            else R.string.chat_message_ignore_google_signatures
+                        ),
+                        onClick = onToggleGoogleThoughtSignatures,
                     )
                 )
             }

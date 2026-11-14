@@ -11,6 +11,7 @@ import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.analytics.FirebaseAnalytics
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharedFlow
@@ -56,7 +57,6 @@ import me.rerere.rikkahub.utils.UiState
 import me.rerere.rikkahub.utils.UpdateChecker
 import me.rerere.rikkahub.utils.base64Decode
 import me.rerere.rikkahub.web.ApiException
-import java.util.Locale
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatVM"
@@ -459,6 +459,14 @@ class ChatVM(
         viewModelScope.launch {
             chatService.restoreTrimmedTool(_conversationId, messageId, toolCallId).onFailure {
                 chatService.addError(it, title = context.getString(R.string.error_title_trim_history))
+            }
+        }
+    }
+
+    fun setGoogleThoughtSignaturesIgnored(messageId: Uuid, ignored: Boolean) {
+        viewModelScope.launch {
+            chatService.setGoogleThoughtSignaturesIgnored(_conversationId, messageId, ignored).onFailure {
+                chatService.addError(it, title = context.getString(R.string.error_title_operation))
             }
         }
     }

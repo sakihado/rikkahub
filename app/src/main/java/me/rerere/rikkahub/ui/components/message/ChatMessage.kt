@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.util.fastAll
 import androidx.compose.ui.util.fastForEach
 import androidx.compose.ui.util.fastForEachIndexed
+import java.util.Locale
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.serialization.json.jsonArray
@@ -70,6 +71,7 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.hasGoogleThoughtSignatures
 import me.rerere.ai.ui.isEmptyUIMessage
 import me.rerere.ai.util.isOmitted
 import me.rerere.hugeicons.HugeIcons
@@ -90,9 +92,9 @@ import me.rerere.rikkahub.ui.components.ui.ChainOfThought
 import me.rerere.rikkahub.ui.components.ui.Favicon
 import me.rerere.rikkahub.ui.components.ui.FaviconRow
 import me.rerere.rikkahub.ui.context.LocalNavController
-import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.context.LocalWorkspaceId
+import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.ui.theme.LocalChatFontFamily
 import me.rerere.rikkahub.ui.theme.rememberChatFontFamily
 import me.rerere.rikkahub.utils.JsonInstant
@@ -100,8 +102,8 @@ import me.rerere.rikkahub.utils.openUrl
 import me.rerere.rikkahub.utils.urlDecode
 import me.rerere.ui.charts.ChartCard
 import me.rerere.ui.charts.ChartSpec
+import me.rerere.ui.components.RikkaConfirmDialog
 import me.rerere.ui.webview.WebViewContentCache
-import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
@@ -120,6 +122,7 @@ fun ChatMessage(
     onUpdate: (MessageNode) -> Unit,
     onRestoreAttachment: ((partIndex: Int) -> Unit)? = null,
     onRestoreTrimmedTool: ((toolCallId: String) -> Unit)? = null,
+    onSetGoogleThoughtSignaturesIgnored: ((Boolean) -> Unit)? = null,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
     onTranslate: ((UIMessage, Locale) -> Unit)? = null,
@@ -156,6 +159,7 @@ fun ChatMessage(
         fontFamily = chatFontFamily
     )
     var showActionsSheet by remember { mutableStateOf(false) }
+    var showSignatureRecoveryConfirm by remember(message.id) { mutableStateOf(false) }
     var showSelectCopySheet by remember { mutableStateOf(false) }
     val navController = LocalNavController.current
     val context = LocalContext.current
@@ -244,6 +248,14 @@ fun ChatMessage(
             }
         }
 
+        if (message.ignoreGoogleThoughtSignatures) {
+            Text(
+                text = stringResource(R.string.chat_message_google_signatures_ignored),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+
         EditedFilesList(
             parts = message.parts,
             assistant = assistant,
@@ -267,6 +279,15 @@ fun ChatMessage(
             },
             isFavorite = isFavorite,
             onToggleFavorite = onToggleFavorite,
+            onToggleGoogleThoughtSignatures = onSetGoogleThoughtSignaturesIgnored?.takeIf {
+                message.role == MessageRole.ASSISTANT &&
+                    (message.ignoreGoogleThoughtSignatures || message.hasGoogleThoughtSignatures())
+            }?.let { callback ->
+                {
+                    if (message.ignoreGoogleThoughtSignatures) callback(false)
+                    else showSignatureRecoveryConfirm = true
+                }
+            },
             onWebViewPreview = {
                 val textContent = message.parts
                     .filterIsInstance<UIMessagePart.Text>()
@@ -287,6 +308,19 @@ fun ChatMessage(
             }
         )
     }
+
+    RikkaConfirmDialog(
+        show = showSignatureRecoveryConfirm,
+        title = stringResource(R.string.chat_message_ignore_google_signatures),
+        confirmText = stringResource(R.string.confirm),
+        dismissText = stringResource(R.string.cancel),
+        onConfirm = {
+            showSignatureRecoveryConfirm = false
+            onSetGoogleThoughtSignaturesIgnored?.invoke(true)
+        },
+        onDismiss = { showSignatureRecoveryConfirm = false },
+        text = { Text(stringResource(R.string.chat_message_ignore_google_signatures_description)) },
+    )
 
     if (showSelectCopySheet) {
         ChatMessageCopySheet(
