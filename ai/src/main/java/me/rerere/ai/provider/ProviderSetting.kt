@@ -36,6 +36,42 @@ enum class ClaudePromptCacheTtl(val apiValue: String?) {
 }
 
 /**
+ * Google Gemini 内置工具（如 Google Search / URL Context）与客户端函数工具同时启用时的兼容模式
+ */
+@Serializable
+enum class GoogleBuiltInToolCompatMode {
+    /** 标准模式：携带 toolConfig.includeServerSideToolInvocations = true */
+    @SerialName("standard")
+    STANDARD,
+
+    /** 蛇形命名模式：改为携带 tool_config.include_server_side_tool_invocations = true */
+    @SerialName("snake_case")
+    SNAKE_CASE_TOOL_CONFIG,
+
+    /** 优先函数工具：存在客户端工具时跳过内置工具（联网搜索自动回退外部搜索） */
+    @SerialName("prefer_function_tools")
+    PREFER_FUNCTION_TOOLS,
+}
+
+/**
+ * 在对话中途切换不同 Google 渠道（尤其切到 Vertex AI）时，历史消息中思考签名的处理策略
+ */
+@Serializable
+enum class GoogleCrossChannelThoughtPolicy {
+    /** 跳过其他渠道生成的思考块，并为跨渠道/缺失签名的 functionCall 填充跳过校验哨兵 */
+    @SerialName("skip_foreign_thought")
+    SKIP_FOREIGN_THOUGHT_AND_BYPASS_TOOLS,
+
+    /** 保留其他渠道思考文本但剥离签名（以普通文本形式续传），并为工具填充跳过校验哨兵 */
+    @SerialName("strip_signature_keep_text")
+    STRIP_SIGNATURE_KEEP_THOUGHT_TEXT,
+
+    /** 不做任何处理，原样透传所有 thoughtSignature */
+    @SerialName("passthrough")
+    PASSTHROUGH,
+}
+
+/**
  * 是否支持模型内置联网搜索（[BuiltInTools.Search]）。
  *
  * OpenAI 兼容提供商只有 Responses API 有 `web_search` 工具，Chat Completions 没有。
@@ -155,6 +191,11 @@ sealed class ProviderSetting {
         var useNativeFileUpload: Boolean = true,
         // 附件以 Base64 inlineData 直接塞进请求（无法访问上传接口的第三方反代用这个）
         var useInlineFileUpload: Boolean = false,
+        // 内置工具与函数工具（MCP / 本地工具等）同时启用时的请求兼容策略
+        var builtInToolCompatMode: GoogleBuiltInToolCompatMode = GoogleBuiltInToolCompatMode.STANDARD,
+        // 对话中切换不同 Google 渠道（尤其切到 Vertex AI）时对历史思考签名的处理策略
+        var crossChannelThoughtPolicy: GoogleCrossChannelThoughtPolicy =
+            GoogleCrossChannelThoughtPolicy.SKIP_FOREIGN_THOUGHT_AND_BYPASS_TOOLS,
     ) : ApiKey() {
         override fun withQuotaQuery(query: QuotaQuery): ApiKey = copy(quotaQuery = query)
 

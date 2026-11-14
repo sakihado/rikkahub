@@ -4,7 +4,9 @@ import androidx.compose.ui.util.fastForEachIndexed
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import me.rerere.ai.ui.GoogleThoughtMetadata
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.ui.metadataAs
 import me.rerere.rikkahub.utils.JsonInstant
 
 internal const val CHART_DISPLAY_TOOL_NAME = "chart_display"
@@ -61,7 +63,9 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
     this.fastForEachIndexed { index, part ->
         when (part) {
             is UIMessagePart.Reasoning -> {
-                currentThinkingSteps.add(ThinkingStep.ReasoningStep(part))
+                if (part.reasoning.isNotBlank() || part.finishedAt == null) {
+                    currentThinkingSteps.add(ThinkingStep.ReasoningStep(part))
+                }
             }
 
             is UIMessagePart.Tool -> {
@@ -79,6 +83,14 @@ fun List<UIMessagePart>.groupMessageParts(): List<MessagePartBlock> {
 
             is UIMessagePart.Notice -> {
                 currentThinkingSteps.add(ThinkingStep.NoticeStep(part))
+            }
+
+            is UIMessagePart.Text -> {
+                // 纯 thoughtSignature 占位 part 不在 UI 中渲染空白气泡
+                if (part.text.isNotEmpty() || part.metadataAs<GoogleThoughtMetadata>() == null) {
+                    flushThinkingSteps()
+                    result.add(MessagePartBlock.ContentBlock(part, index))
+                }
             }
 
             else -> {

@@ -41,21 +41,21 @@ data class UIMessage(
     val isSynthetic: Boolean = false,
 ) {
     fun summaryAsText(maxLength: Int = Int.MAX_VALUE): String {
-        val text = "[${role.name}]: " + parts.joinToString(separator = "\n") { part ->
+        val text = "[${role.name}]: " + parts.mapNotNull { part ->
             when (part) {
-                is UIMessagePart.Text -> part.text
-                else -> ""
+                is UIMessagePart.Text -> part.text.takeIf { it.isNotEmpty() }
+                else -> null
             }
-        }
+        }.joinToString(separator = "\n")
         return if (text.length > maxLength) text.take(maxLength) + "..." else text
     }
 
-    fun toText() = parts.joinToString(separator = "\n") { part ->
+    fun toText() = parts.mapNotNull { part ->
         when (part) {
-            is UIMessagePart.Text -> part.text
-            else -> ""
+            is UIMessagePart.Text -> part.text.takeIf { it.isNotEmpty() }
+            else -> null
         }
-    }
+    }.joinToString(separator = "\n")
 
     /**
      * 只有 [UIMessagePart.Notice]，没有用户或模型说的话。

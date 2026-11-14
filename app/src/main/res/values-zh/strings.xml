@@ -1921,4 +1921,20 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="auto_trim_context">上下文水位</string>
   <string name="auto_trim_context_desc">上下文占用达到这个大小后，才在工具执行完的间隙做一次批量裁剪。</string>
   <string name="auto_trim_context_value">%1$d K</string>
+
+  <!-- Google 提供商兼容设置 -->
+  <string name="setting_provider_google_builtin_tool_compat">内置工具与函数工具兼容</string>
+  <string name="setting_provider_google_builtin_tool_compat_standard">标准</string>
+  <string name="setting_provider_google_builtin_tool_compat_snake_case">snake_case</string>
+  <string name="setting_provider_google_builtin_tool_compat_prefer_tools">优先工具</string>
+  <string name="setting_provider_google_builtin_tool_compat_standard_desc">同时启用内置工具与函数工具时，按标准格式发送 toolConfig.includeServerSideToolInvocations。</string>
+  <string name="setting_provider_google_builtin_tool_compat_snake_case_desc">改为发送 tool_config.include_server_side_tool_invocations，适配仅识别蛇形命名的中转站。</string>
+  <string name="setting_provider_google_builtin_tool_compat_prefer_tools_desc">存在函数工具时自动跳过内置工具（若开启了联网搜索，会自动回退为外部搜索工具）。</string>
+  <string name="setting_provider_google_thought_signature_policy">跨渠道思考签名处理</string>
+  <string name="setting_provider_google_thought_signature_skip_foreign">跳过外域</string>
+  <string name="setting_provider_google_thought_signature_keep_text">保留文本</string>
+  <string name="setting_provider_google_thought_signature_passthrough">原样透传</string>
+  <string name="setting_provider_google_thought_signature_skip_foreign_desc">对话中切换渠道（如中转/AI Studio 切到 Vertex）时跳过其他渠道思考块，并为工具调用填充校验跳过标记（推荐）。</string>
+  <string name="setting_provider_google_thought_signature_keep_text_desc">剥离其他渠道思考签名并转为普通文本保留，同时为工具调用填充校验跳过标记。</string>
+  <string name="setting_provider_google_thought_signature_passthrough_desc">不做跨渠道清洗，始终原样回传历史消息里的 thoughtSignature。</string>
 </resources>

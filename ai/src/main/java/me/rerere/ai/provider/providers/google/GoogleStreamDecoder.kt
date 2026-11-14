@@ -28,6 +28,7 @@ import kotlin.time.Clock
 internal class GoogleStreamDecoder(
     private val responseId: String,
     private val model: String,
+    private val signatureOrigin: String? = null,
 ) : StreamChunkDecoder {
     private val streamState = GoogleStreamState()
     private var finishReason: String? = null
@@ -73,8 +74,9 @@ internal class GoogleStreamDecoder(
     private fun parsePart(part: JsonObject, index: Int): UIMessagePart = when {
         part.containsKey("text") -> {
             val text = part["text"]?.jsonPrimitive?.contentOrNull ?: ""
-            val metadata = part.toGoogleThoughtMetadata()
-            if (part["thought"]?.jsonPrimitive?.booleanOrNull == true) {
+            val thought = part["thought"]?.jsonPrimitive?.booleanOrNull == true
+            val metadata = part.toGoogleThoughtMetadata(isThought = thought.takeIf { it })
+            if (thought) {
                 UIMessagePart.Reasoning(text, Clock.System.now(), null, metadata)
             } else {
                 UIMessagePart.Text(text, metadata)
@@ -84,13 +86,15 @@ internal class GoogleStreamDecoder(
             val functionCall = part["functionCall"]!!.jsonObject
             val toolCallId = functionCall["id"]?.jsonPrimitive?.contentOrNull
                 ?: "$responseId:tool-${++toolSequence}"
+            val thoughtSignature = part["thoughtSignature"]?.jsonPrimitive?.contentOrNull
             UIMessagePart.Tool(
                 toolCallId = toolCallId,
                 toolName = functionCall["name"]?.jsonPrimitive?.contentOrNull ?: "",
                 input = functionCall["args"]?.let(json::encodeToString) ?: "",
                 output = emptyList(),
                 metadata = GoogleThoughtMetadata(
-                    thoughtSignature = part["thoughtSignature"]?.jsonPrimitive?.contentOrNull,
+                    thoughtSignature = thoughtSignature,
+                    signatureOrigin = signatureOrigin,
                 ).toMetadata(),
             )
         }
@@ -107,6 +111,7 @@ internal class GoogleStreamDecoder(
                     protocol = ServerToolProtocol.GOOGLE_GENERATE_CONTENT,
                     call = part,
                     callIndex = index,
+                    signatureOrigin = signatureOrigin,
                 ).toMetadata(),
             )
         }
@@ -123,6 +128,7 @@ internal class GoogleStreamDecoder(
                     protocol = ServerToolProtocol.GOOGLE_GENERATE_CONTENT,
                     result = part,
                     resultIndex = index,
+                    signatureOrigin = signatureOrigin,
                 ).toMetadata(),
             )
         }
@@ -131,12 +137,27 @@ internal class GoogleStreamDecoder(
             val mimeType = inlineData["mimeType"]?.jsonPrimitive?.contentOrNull ?: "image/png"
             require(mimeType.startsWith("image/")) { "Only image mime type is supported" }
             if (part["thought"]?.jsonPrimitive?.booleanOrNull == true) {
-                UIMessagePart.Reasoning("[Draft Image]\n", Clock.System.now(), null)
+                UIMessagePart.Reasoning(
+                    reasoning = "[Draft Image]\n",
+                    createdAt = Clock.System.now(),
+                    finishedAt = null,
+                    metadata = part.toGoogleThoughtMetadata(isThought = true),
+                )
             } else {
                 UIMessagePart.Image(
                     url = "data:$mimeType;base64,${inlineData["data"]?.jsonPrimitive?.contentOrNull ?: ""}",
                     metadata = part.toGoogleThoughtMetadata(),
                 )
+            }
+        }
+        part.containsKey("thoughtSignature") -> {
+            val thought = part["thought"]?.jsonPrimitive?.booleanOrNull == true
+            val metadata = part.toGoogleThoughtMetadata(isThought = thought.takeIf { it })
+            if (thought) {
+                val now = Clock.System.now()
+                UIMessagePart.Reasoning("", now, now, metadata)
+            } else {
+                UIMessagePart.Text("", metadata)
             }
         }
         else -> error("unknown message part type: $part")
@@ -183,13 +204,24 @@ internal class GoogleStreamDecoder(
                             textId = it; add(StreamChunk.TextStart(it, part.metadata))
                         }
                         add(StreamChunk.TextDelta(id, part.text, part.metadata))
+                    } else if (part.metadata != null) {
+                        // 纯签名占位 part 独立发出，不合并到前一个文本 part 上
+                        addAll(closeText()); addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
+                        val id = nextId(responseId, "text")
+                        add(StreamChunk.TextStart(id, part.metadata))
+                        add(StreamChunk.TextDelta(id, "", part.metadata))
+                        add(StreamChunk.TextEnd(id))
                     }
                     is UIMessagePart.Reasoning -> if (part.reasoning.isNotEmpty() || part.metadata != null) {
                         addAll(closeText()); addAll(closeImage()); addAll(closeTools())
+                        val isNew = reasoningId == null
                         val id = reasoningId ?: nextId(responseId, "reasoning").also {
                             reasoningId = it; add(StreamChunk.ReasoningStart(it, part.metadata))
                         }
                         add(StreamChunk.ReasoningDelta(id, part.reasoning, part.metadata))
+                        if (isNew && part.reasoning.isEmpty() && part.finishedAt != null) {
+                            addAll(closeReasoning())
+                        }
                     }
                     is UIMessagePart.Tool -> {
                         addAll(closeText()); addAll(closeReasoning()); addAll(closeImage())
@@ -261,8 +293,12 @@ internal class GoogleStreamDecoder(
             "$responseId:$kind-${++sequence}"
     }
 
-    private fun JsonObject.toGoogleThoughtMetadata() =
-        this["thoughtSignature"]?.jsonPrimitive?.contentOrNull?.let {
-            GoogleThoughtMetadata(thoughtSignature = it).toMetadata()
-        }
+    private fun JsonObject.toGoogleThoughtMetadata(isThought: Boolean? = null): JsonObject? {
+        val signature = this["thoughtSignature"]?.jsonPrimitive?.contentOrNull ?: return null
+        return GoogleThoughtMetadata(
+            thoughtSignature = signature,
+            signatureOrigin = signatureOrigin,
+            isThought = isThought,
+        ).toMetadata()
+    }
 }

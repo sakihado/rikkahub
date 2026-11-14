@@ -1919,4 +1919,20 @@
   <string name="auto_trim_context">Context watermark</string>
   <string name="auto_trim_context_desc">Only batch-trim between tool calls once the context reaches this size.</string>
   <string name="auto_trim_context_value">%1$d K</string>
+
+  <!-- Google Provider compatibility -->
+  <string name="setting_provider_google_builtin_tool_compat">Built-in &amp; function tools</string>
+  <string name="setting_provider_google_builtin_tool_compat_standard">Standard</string>
+  <string name="setting_provider_google_builtin_tool_compat_snake_case">snake_case</string>
+  <string name="setting_provider_google_builtin_tool_compat_prefer_tools">Tools Only</string>
+  <string name="setting_provider_google_builtin_tool_compat_standard_desc">Send toolConfig.includeServerSideToolInvocations=true when built-in tools and function tools are both enabled.</string>
+  <string name="setting_provider_google_builtin_tool_compat_snake_case_desc">Send snake_case tool_config.include_server_side_tool_invocations=true for proxies that reject camelCase.</string>
+  <string name="setting_provider_google_builtin_tool_compat_prefer_tools_desc">Skip Google built-in tools whenever function tools are present (falls back to external search if enabled).</string>
+  <string name="setting_provider_google_thought_signature_policy">Cross-channel thought signature</string>
+  <string name="setting_provider_google_thought_signature_skip_foreign">Skip Foreign</string>
+  <string name="setting_provider_google_thought_signature_keep_text">Keep Text</string>
+  <string name="setting_provider_google_thought_signature_passthrough">Passthrough</string>
+  <string name="setting_provider_google_thought_signature_skip_foreign_desc">When switching channels (e.g. proxy/AI Studio to Vertex AI), omit foreign thinking blocks and bypass validation on foreign tool calls.</string>
+  <string name="setting_provider_google_thought_signature_keep_text_desc">Keep foreign thinking text as plain text without signature, and bypass validation on foreign tool calls.</string>
+  <string name="setting_provider_google_thought_signature_passthrough_desc">Always replay original thought signatures across channels without adaptation.</string>
 </resources>

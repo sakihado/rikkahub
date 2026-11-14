@@ -49,6 +49,7 @@ import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.provider.runQuotaQuery
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.ui.ClaudeReasoningMetadata
+import me.rerere.ai.ui.GoogleThoughtMetadata
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
@@ -734,9 +735,13 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
     }
 
     private fun UIMessagePart.toContentBlock(): JsonObject? = when (this) {
-        is UIMessagePart.Text -> buildJsonObject {
-            put("type", "text")
-            put("text", text)
+        is UIMessagePart.Text -> if (text.isEmpty() && metadataAs<GoogleThoughtMetadata>() != null) {
+            null
+        } else {
+            buildJsonObject {
+                put("type", "text")
+                put("text", text)
+            }
         }
 
         is UIMessagePart.Image -> buildJsonObject {
@@ -754,16 +759,22 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             }
         }
 
-        is UIMessagePart.Reasoning -> buildJsonObject {
+        is UIMessagePart.Reasoning -> {
             val claudeMetadata = metadataAs<ClaudeReasoningMetadata>()
             val redactedData = claudeMetadata?.redactedData
-            if (redactedData != null) {
-                put("type", "redacted_thinking")
-                put("data", redactedData)
+            if (redactedData == null && reasoning.isEmpty() && metadataAs<GoogleThoughtMetadata>() != null) {
+                null
             } else {
-                put("type", "thinking")
-                put("thinking", reasoning)
-                claudeMetadata?.signature?.let { put("signature", it) }
+                buildJsonObject {
+                    if (redactedData != null) {
+                        put("type", "redacted_thinking")
+                        put("data", redactedData)
+                    } else {
+                        put("type", "thinking")
+                        put("thinking", reasoning)
+                        claudeMetadata?.signature?.let { put("signature", it) }
+                    }
+                }
             }
         }
 

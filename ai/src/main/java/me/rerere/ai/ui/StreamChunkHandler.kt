@@ -371,11 +371,14 @@ private fun UIMessage.appendMessage(delta: UIMessage): UIMessage {
         when (deltaPart) {
             is UIMessagePart.Text -> {
                 if (deltaPart.text.isEmpty()) {
-                    acc
+                    if (deltaPart.metadata != null) acc + deltaPart else acc
                 } else {
                     val lastPart = acc.lastOrNull()
-                    if (lastPart is UIMessagePart.Text) {
-                        acc.dropLast(1) + lastPart.copy(text = lastPart.text + deltaPart.text)
+                    if (lastPart is UIMessagePart.Text && lastPart.text.isNotEmpty() && lastPart.metadata == null) {
+                        acc.dropLast(1) + lastPart.copy(
+                            text = lastPart.text + deltaPart.text,
+                            metadata = deltaPart.metadata ?: lastPart.metadata,
+                        )
                     } else {
                         acc + deltaPart
                     }

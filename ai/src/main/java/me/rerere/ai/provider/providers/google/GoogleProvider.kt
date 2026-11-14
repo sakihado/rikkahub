@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonArrayBuilder
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -31,6 +32,8 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.GoogleBuiltInToolCompatMode
+import me.rerere.ai.provider.GoogleCrossChannelThoughtPolicy
 import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
@@ -86,6 +89,29 @@ import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
 private const val TAG = "GoogleProvider"
+private const val SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator"
+
+internal fun ProviderSetting.Google.thoughtSignatureOrigin(): String = when {
+    vertexAI && useServiceAccount ->
+        "vertex:${projectId.trim()}:${location.trim()}"
+    vertexAI ->
+        "vertex:${id}"
+    else -> {
+        val host = runCatching { baseUrl.trim().toHttpUrl().host }.getOrDefault(baseUrl.trim())
+        "google:${id}:$host"
+    }
+}
+
+private data class ThoughtReplayContext(
+    val currentOrigin: String? = null,
+    val policy: GoogleCrossChannelThoughtPolicy = GoogleCrossChannelThoughtPolicy.PASSTHROUGH,
+) {
+    fun isAdaptationEnabled(): Boolean =
+        currentOrigin != null && policy != GoogleCrossChannelThoughtPolicy.PASSTHROUGH
+
+    fun isForeignOrUnknown(origin: String?): Boolean =
+        isAdaptationEnabled() && origin != currentOrigin
+}
 
 class GoogleProvider(private val client: OkHttpClient, context: Context? = null) : Provider<ProviderSetting.Google> {
     private val keyRoulette = if (context != null) KeyRoulette.lru(context) else KeyRoulette.default()
@@ -212,7 +238,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             customHeaders = params.customHeaders,
             messages = messages,
         )
-        val requestBody = buildCompletionRequestBody(resolvedMessages, params)
+        val requestBody = buildCompletionRequestBody(resolvedMessages, params, providerSetting)
 
         val url = buildUrl(
             providerSetting = providerSetting,
@@ -238,7 +264,8 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body?.string()}")
+            val errorBody = response.body?.string()
+            throw Exception(enhanceGoogleErrorMessage("Failed to get response: ${response.code} $errorBody"))
         }
 
         val bodyStr = response.body?.string() ?: ""
@@ -249,7 +276,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         TextGenerationResult(
             id = Uuid.random().toString(),
             model = params.model.modelId,
-            message = parseMessage(candidate),
+            message = parseMessage(candidate, signatureOrigin = providerSetting.thoughtSignatureOrigin()),
             finishReason = candidate["finishReason"]?.jsonPrimitive?.contentOrNull,
             usage = parseUsageMeta(bodyJson["usageMetadata"] as? JsonObject),
         )
@@ -275,7 +302,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             customHeaders = params.customHeaders,
             messages = messages,
         )
-        val requestBody = buildCompletionRequestBody(resolvedMessages, params)
+        val requestBody = buildCompletionRequestBody(resolvedMessages, params, providerSetting)
 
         val url = buildUrl(
             providerSetting = providerSetting,
@@ -302,7 +329,11 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
 
         val responseId = Uuid.random().toString()
-        val decoder = GoogleStreamDecoder(responseId, params.model.modelId)
+        val decoder = GoogleStreamDecoder(
+            responseId = responseId,
+            model = params.model.modelId,
+            signatureOrigin = providerSetting.thoughtSignatureOrigin(),
+        )
 
         fun sendChunks(chunks: Iterable<StreamChunk>) {
             chunks.forEach { chunk ->
@@ -347,12 +378,18 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         if (!bodyStr.isNullOrEmpty()) {
                             val bodyElement = json.parseToJsonElement(bodyStr)
                             println(bodyElement)
-                            if (bodyElement is JsonObject) {
-                                exception = Exception(
-                                    bodyElement["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
-                                        ?: "unknown"
-                                )
+                            val errorMessage = when (bodyElement) {
+                                is JsonObject ->
+                                    bodyElement["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
+                                        ?: bodyStr
+                                is JsonArray ->
+                                    bodyElement.firstOrNull()?.jsonObjectOrNull
+                                        ?.get("error")?.jsonObjectOrNull
+                                        ?.get("message")?.jsonPrimitiveOrNull?.contentOrNull
+                                        ?: bodyStr
+                                else -> bodyStr
                             }
+                            exception = Exception(enhanceGoogleErrorMessage(errorMessage))
                         } else {
                             exception = Exception("Unknown error: ${response.code}")
                         }
@@ -381,9 +418,16 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         // trySend 在缓冲满时会静默丢弃 delta，导致回复中间缺字 (#1295)，因此缓冲必须无界
     }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
 
+    // 保留无 providerSetting 的重载供既有单测反射调用
     private fun buildCompletionRequestBody(
         messages: List<UIMessage>,
-        params: TextGenerationParams
+        params: TextGenerationParams,
+    ): JsonObject = buildCompletionRequestBody(messages, params, providerSetting = null)
+
+    private fun buildCompletionRequestBody(
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        providerSetting: ProviderSetting.Google?,
     ): JsonObject = buildJsonObject {
         // System message if available
         val systemMessage = messages.firstOrNull { it.role == MessageRole.SYSTEM }
@@ -450,15 +494,23 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         })
 
         // Contents (user messages)
+        val replayContext = providerSetting?.let {
+            ThoughtReplayContext(
+                currentOrigin = it.thoughtSignatureOrigin(),
+                policy = it.crossChannelThoughtPolicy,
+            )
+        } ?: ThoughtReplayContext()
         put(
             "contents",
-            buildContents(messages)
+            buildContents(messages, replayContext)
         )
 
         // Client function tools and model built-in tools share the same array.
+        val compatMode = providerSetting?.builtInToolCompatMode ?: GoogleBuiltInToolCompatMode.STANDARD
         val useFunctionTools =
             params.tools.isNotEmpty() && params.model.abilities.contains(ModelAbility.TOOL)
-        val useBuiltInTools = params.model.tools.any {
+        val allowBuiltInTools = !(useFunctionTools && compatMode == GoogleBuiltInToolCompatMode.PREFER_FUNCTION_TOOLS)
+        val useBuiltInTools = allowBuiltInTools && params.model.tools.any {
             it == BuiltInTools.Search || it == BuiltInTools.UrlContext
         }
         if (useFunctionTools || useBuiltInTools) {
@@ -490,29 +542,43 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         }
                     })
                 }
-                params.model.tools.forEach { builtInTool ->
-                    when (builtInTool) {
-                        BuiltInTools.Search -> {
-                            add(buildJsonObject {
-                                put("googleSearch", buildJsonObject {})
-                            })
-                        }
+                if (allowBuiltInTools) {
+                    params.model.tools.forEach { builtInTool ->
+                        when (builtInTool) {
+                            BuiltInTools.Search -> {
+                                add(buildJsonObject {
+                                    put("googleSearch", buildJsonObject {})
+                                })
+                            }
 
-                        BuiltInTools.UrlContext -> {
-                            add(buildJsonObject {
-                                put("urlContext", buildJsonObject {})
-                            })
-                        }
+                            BuiltInTools.UrlContext -> {
+                                add(buildJsonObject {
+                                    put("urlContext", buildJsonObject {})
+                                })
+                            }
 
-                        else -> {}
+                            else -> {}
+                        }
                     }
                 }
             }
         }
         if (useFunctionTools && useBuiltInTools) {
-            put("toolConfig", buildJsonObject {
-                put("includeServerSideToolInvocations", true)
-            })
+            when (compatMode) {
+                GoogleBuiltInToolCompatMode.STANDARD -> {
+                    put("toolConfig", buildJsonObject {
+                        put("includeServerSideToolInvocations", true)
+                    })
+                }
+
+                GoogleBuiltInToolCompatMode.SNAKE_CASE_TOOL_CONFIG -> {
+                    put("tool_config", buildJsonObject {
+                        put("include_server_side_tool_invocations", true)
+                    })
+                }
+
+                GoogleBuiltInToolCompatMode.PREFER_FUNCTION_TOOLS -> Unit
+            }
         }
 
         // Safety Settings
@@ -558,12 +624,12 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun parseMessage(message: JsonObject): UIMessage {
+    private fun parseMessage(message: JsonObject, signatureOrigin: String? = null): UIMessage {
         val role = googleRoleToCommonRole(
             message["role"]?.jsonPrimitive?.contentOrNull ?: "model"
         )
         val content = message["content"]?.jsonObject ?: error("No content")
-        val parts = parseMessageParts(content["parts"]?.jsonArray)
+        val parts = parseMessageParts(content["parts"]?.jsonArray, signatureOrigin)
 
         val groundingMetadata = message["groundingMetadata"]?.jsonObject
         Log.i(TAG, "parseMessage: $groundingMetadata")
@@ -592,9 +658,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         return chunks
     }
 
-    private fun parseMessageParts(parts: JsonArray?): List<UIMessagePart> = buildList {
+    private fun parseMessageParts(parts: JsonArray?, signatureOrigin: String? = null): List<UIMessagePart> = buildList {
         parts.orEmpty().forEachIndexed { index, element ->
-            val part = parseMessagePart(element.jsonObject, index)
+            val part = parseMessagePart(element.jsonObject, index, signatureOrigin)
             if (part !is UIMessagePart.ServerTool) {
                 add(part)
                 return@forEachIndexed
@@ -620,19 +686,27 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun parseMessagePart(jsonObject: JsonObject, index: Int): UIMessagePart {
+    private fun parseMessagePart(
+        jsonObject: JsonObject,
+        index: Int,
+        signatureOrigin: String? = null,
+    ): UIMessagePart {
         return when {
             jsonObject.containsKey("text") -> {
                 val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
                 val text = jsonObject["text"]?.jsonPrimitive?.content ?: ""
+                val metadata = jsonObject.toGoogleThoughtMetadata(
+                    signatureOrigin = signatureOrigin,
+                    isThought = thought.takeIf { it },
+                )
                 if (thought) UIMessagePart.Reasoning(
                     reasoning = text,
                     createdAt = Clock.System.now(),
                     finishedAt = null,
-                    metadata = jsonObject.toGoogleThoughtMetadata(),
+                    metadata = metadata,
                 ) else UIMessagePart.Text(
                     text = text,
-                    metadata = jsonObject.toGoogleThoughtMetadata(),
+                    metadata = metadata,
                 )
             }
 
@@ -640,14 +714,16 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 val functionCall = jsonObject["functionCall"]!!.jsonObject
                 val toolCallId = functionCall["id"]?.jsonPrimitive?.contentOrNull
                     ?: Uuid.random().toString()
+                val thoughtSignature = jsonObject["thoughtSignature"]?.jsonPrimitive?.contentOrNull
                 UIMessagePart.Tool(
                     toolCallId = toolCallId,
                     toolName = functionCall["name"]!!.jsonPrimitive.content,
                     input = json.encodeToString(functionCall["args"]),
                     output = emptyList(),
                     metadata = GoogleThoughtMetadata(
-                        thoughtSignature = jsonObject["thoughtSignature"]?.jsonPrimitive?.contentOrNull,
-                    ).toMetadata()
+                        thoughtSignature = thoughtSignature,
+                        signatureOrigin = signatureOrigin,
+                    ).takeIf { thoughtSignature != null || signatureOrigin != null }?.toMetadata()
                 )
             }
 
@@ -663,6 +739,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         protocol = ServerToolProtocol.GOOGLE_GENERATE_CONTENT,
                         call = jsonObject,
                         callIndex = index,
+                        signatureOrigin = signatureOrigin,
                     ).toMetadata(),
                 )
             }
@@ -679,6 +756,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         protocol = ServerToolProtocol.GOOGLE_GENERATE_CONTENT,
                         result = jsonObject,
                         resultIndex = index,
+                        signatureOrigin = signatureOrigin,
                     ).toMetadata(),
                 )
             }
@@ -688,57 +766,92 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 val mime = inlineData["mimeType"]?.jsonPrimitive?.content ?: "image/png"
                 val data = inlineData["data"]?.jsonPrimitive?.content ?: ""
                 val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
-                val thoughtSignature = jsonObject["thoughtSignature"]?.jsonPrimitive?.contentOrNull
                 require(mime.startsWith("image/")) {
                     "Only image mime type is supported"
                 }
-                // 如果是思考过程中的草稿图，直接忽略
+                // 如果是思考过程中的草稿图，忽略图片数据但保留签名信息
                 if (thought) {
                     return UIMessagePart.Reasoning(
                         reasoning = "[Draft Image]\n",
                         createdAt = Clock.System.now(),
-                        finishedAt = null
+                        finishedAt = null,
+                        metadata = jsonObject.toGoogleThoughtMetadata(
+                            signatureOrigin = signatureOrigin,
+                            isThought = true,
+                        ),
                     )
                 }
                 UIMessagePart.Image(
                     url = "data:$mime;base64,$data",
-                    metadata = GoogleThoughtMetadata(thoughtSignature = thoughtSignature)
-                        .takeIf { thoughtSignature != null }
-                        ?.toMetadata()
+                    metadata = jsonObject.toGoogleThoughtMetadata(signatureOrigin = signatureOrigin),
                 )
+            }
+
+            jsonObject.containsKey("thoughtSignature") -> {
+                val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
+                val metadata = jsonObject.toGoogleThoughtMetadata(
+                    signatureOrigin = signatureOrigin,
+                    isThought = thought.takeIf { it },
+                )
+                if (thought) {
+                    val now = Clock.System.now()
+                    UIMessagePart.Reasoning(
+                        reasoning = "",
+                        createdAt = now,
+                        finishedAt = now,
+                        metadata = metadata,
+                    )
+                } else {
+                    UIMessagePart.Text(
+                        text = "",
+                        metadata = metadata,
+                    )
+                }
             }
 
             else -> error("unknown message part type: $jsonObject")
         }
     }
 
-    private fun buildContents(messages: List<UIMessage>): JsonArray {
+    // 保留无 ThoughtReplayContext 的重载供既有单测反射调用
+    private fun buildContents(messages: List<UIMessage>): JsonArray =
+        buildContents(messages, ThoughtReplayContext())
+
+    private fun buildContents(
+        messages: List<UIMessage>,
+        replayContext: ThoughtReplayContext,
+    ): JsonArray {
         return buildJsonArray {
             messages
                 .filter { it.role != MessageRole.SYSTEM && it.isValidToUpload() }
                 .forEach { message ->
                     if (message.role == MessageRole.ASSISTANT) {
-                        addModelMessage(message)
+                        addModelMessage(message, replayContext)
                     } else {
-                        addUserMessage(message)
+                        addUserMessage(message, replayContext)
                     }
                 }
         }
     }
 
-    private fun JsonArrayBuilder.addModelMessage(message: UIMessage) {
+    private fun JsonArrayBuilder.addModelMessage(
+        message: UIMessage,
+        replayContext: ThoughtReplayContext,
+    ) {
         val groups = groupPartsByToolBoundary(message.parts)
         val partsBuffer = mutableListOf<JsonObject>()
 
         for (group in groups) {
             when (group) {
                 is PartGroup.Content -> {
-                    group.parts.flatMap { it.toGoogleParts() }.forEach { partsBuffer.add(it) }
+                    group.parts.flatMap { it.toGoogleParts(replayContext) }.forEach { partsBuffer.add(it) }
                 }
 
                 is PartGroup.Tools -> {
                     // 添加 functionCall 到 parts 缓冲
-                    group.tools.forEach { partsBuffer.add(it.toFunctionCallPart()) }
+                    group.tools.forEachIndexed { index, tool ->
+                        partsBuffer.add(tool.toFunctionCallPart(replayContext, isFirstInBatch = index == 0))
+                    }
 
                     // 输出 model 消息
                     add(buildJsonObject {
@@ -751,7 +864,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     add(buildJsonObject {
                         put("role", "user")
                         putJsonArray("parts") {
-                            group.tools.forEach { add(it.toFunctionResponsePart()) }
+                            group.tools.forEach { add(it.toFunctionResponsePart(replayContext)) }
                         }
                     })
                 }
@@ -767,48 +880,92 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun JsonArrayBuilder.addUserMessage(message: UIMessage) {
+    private fun JsonArrayBuilder.addUserMessage(
+        message: UIMessage,
+        replayContext: ThoughtReplayContext,
+    ) {
+        val parts = message.parts.flatMap { it.toGoogleParts(replayContext) }
+        if (parts.isEmpty()) return
         add(buildJsonObject {
             put("role", commonRoleToGoogleRole(message.role))
             putJsonArray("parts") {
-                message.parts.flatMap { it.toGoogleParts() }.forEach { add(it) }
+                parts.forEach { add(it) }
             }
         })
     }
 
-    private fun UIMessagePart.toGoogleParts(): List<JsonObject> = when (this) {
-        is UIMessagePart.ServerTool -> toGoogleServerToolParts()
-        else -> listOfNotNull(toGooglePart())
+    private fun UIMessagePart.toGoogleParts(
+        replayContext: ThoughtReplayContext = ThoughtReplayContext(),
+    ): List<JsonObject> = when (this) {
+        is UIMessagePart.ServerTool -> toGoogleServerToolParts(replayContext)
+        else -> listOfNotNull(toGooglePart(replayContext))
     }
 
-    private fun UIMessagePart.toGooglePart(): JsonObject? = when (this) {
+    private fun UIMessagePart.toGooglePart(
+        replayContext: ThoughtReplayContext = ThoughtReplayContext(),
+    ): JsonObject? = when (this) {
         is UIMessagePart.Text -> {
-            val thoughtSignature = metadataAs<GoogleThoughtMetadata>()?.thoughtSignature
-            buildJsonObject {
-                put("text", text)
-                thoughtSignature?.let { put("thoughtSignature", it) }
+            val thoughtMeta = metadataAs<GoogleThoughtMetadata>()
+            val signature = thoughtMeta?.thoughtSignature?.takeIf {
+                !replayContext.isForeignOrUnknown(thoughtMeta.signatureOrigin)
+            }
+            if (text.isEmpty() && signature == null) {
+                null
+            } else {
+                buildJsonObject {
+                    put("text", text)
+                    signature?.let { put("thoughtSignature", it) }
+                }
             }
         }
 
         is UIMessagePart.Reasoning -> {
-            val thoughtSignature = metadataAs<GoogleThoughtMetadata>()?.thoughtSignature
-            buildJsonObject {
-                put("text", reasoning)
-                put("thought", true)
-                thoughtSignature?.let { put("thoughtSignature", it) }
+            val thoughtMeta = metadataAs<GoogleThoughtMetadata>()
+            val isForeign = replayContext.isForeignOrUnknown(thoughtMeta?.signatureOrigin)
+            if (isForeign) {
+                when (replayContext.policy) {
+                    GoogleCrossChannelThoughtPolicy.SKIP_FOREIGN_THOUGHT_AND_BYPASS_TOOLS -> null
+                    GoogleCrossChannelThoughtPolicy.STRIP_SIGNATURE_KEEP_THOUGHT_TEXT -> {
+                        reasoning.takeIf { it.isNotBlank() }?.let {
+                            buildJsonObject {
+                                put("text", "[Thought]\n$it")
+                            }
+                        }
+                    }
+                    GoogleCrossChannelThoughtPolicy.PASSTHROUGH -> {
+                        buildJsonObject {
+                            put("text", reasoning)
+                            put("thought", true)
+                            thoughtMeta?.thoughtSignature?.let { put("thoughtSignature", it) }
+                        }
+                    }
+                }
+            } else {
+                val signature = thoughtMeta?.thoughtSignature
+                if (reasoning.isEmpty() && signature == null) {
+                    null
+                } else {
+                    buildJsonObject {
+                        put("text", reasoning)
+                        put("thought", true)
+                        signature?.let { put("thoughtSignature", it) }
+                    }
+                }
             }
         }
 
         is UIMessagePart.Image -> {
             encodeBase64(false).getOrNull()?.let { encoded ->
+                val thoughtMeta = metadataAs<GoogleThoughtMetadata>()
+                val signature = thoughtMeta?.thoughtSignature?.takeIf {
+                    !replayContext.isForeignOrUnknown(thoughtMeta.signatureOrigin)
+                }
                 buildJsonObject {
                     put("inlineData", buildJsonObject {
                         put("mimeType", encoded.mimeType)
                         put("data", encoded.base64)
                     })
-                    metadataAs<GoogleThoughtMetadata>()?.thoughtSignature?.let {
-                        put("thoughtSignature", it)
-                    }
+                    signature?.let { put("thoughtSignature", it) }
                 }
             }
         }
@@ -875,18 +1032,27 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
     }
 
-    private fun UIMessagePart.Tool.toFunctionCallPart() = buildJsonObject {
+    private fun UIMessagePart.Tool.toFunctionCallPart(
+        replayContext: ThoughtReplayContext = ThoughtReplayContext(),
+        isFirstInBatch: Boolean = true,
+    ) = buildJsonObject {
         put("functionCall", buildJsonObject {
             put("name", toolName)
             put("args", inputAsJson())
             put("id", toolCallId)
         })
-        metadataAs<GoogleThoughtMetadata>()?.thoughtSignature?.let {
-            put("thoughtSignature", it)
+        val thoughtMeta = metadataAs<GoogleThoughtMetadata>()
+        val signature = if (replayContext.isForeignOrUnknown(thoughtMeta?.signatureOrigin)) {
+            if (isFirstInBatch) SKIP_THOUGHT_SIGNATURE_VALIDATOR else null
+        } else {
+            thoughtMeta?.thoughtSignature
         }
+        signature?.let { put("thoughtSignature", it) }
     }
 
-    private fun UIMessagePart.Tool.toFunctionResponsePart() = buildJsonObject {
+    private fun UIMessagePart.Tool.toFunctionResponsePart(
+        replayContext: ThoughtReplayContext = ThoughtReplayContext(),
+    ) = buildJsonObject {
             put("functionResponse", buildJsonObject {
                 put("name", toolName)
                 put("id", toolCallId)
@@ -898,7 +1064,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 // 过滤出最终包含 inlineData 的数据块
                 val mediaGoogleParts = output
                     .filter { it !is UIMessagePart.Text }
-                    .mapNotNull { it.toGooglePart() }
+                    .mapNotNull { it.toGooglePart(replayContext) }
                     .filter { it.containsKey("inlineData") } 
 
                 // 3. 构建给模型看的结构化 response 节点
@@ -950,23 +1116,46 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             })
         }
 
-    private fun UIMessagePart.ServerTool.toGoogleServerToolParts(): List<JsonObject> {
+    private fun UIMessagePart.ServerTool.toGoogleServerToolParts(
+        replayContext: ThoughtReplayContext = ThoughtReplayContext(),
+    ): List<JsonObject> {
         val metadata = metadataAs<ServerToolMetadata>()
         val protocol = metadata?.protocol
         if (protocol != null && protocol != ServerToolProtocol.GOOGLE_GENERATE_CONTENT) {
             return emptyList()
         }
 
+        val stripForeignSignature = replayContext.isForeignOrUnknown(metadata?.signatureOrigin)
         return buildList {
-            metadata?.call?.let(::add)
-            metadata?.result?.let(::add)
+            metadata?.call?.let { add(if (stripForeignSignature) it.stripThoughtSignature() else it) }
+            metadata?.result?.let { add(if (stripForeignSignature) it.stripThoughtSignature() else it) }
         }
     }
 
-    private fun JsonObject.toGoogleThoughtMetadata() =
-        this["thoughtSignature"]?.jsonPrimitive?.contentOrNull?.let {
-            GoogleThoughtMetadata(thoughtSignature = it).toMetadata()
+    private fun JsonObject.stripThoughtSignature(): JsonObject {
+        val stripped = (removeElements(listOf("thoughtSignature")) as? JsonObject) ?: this
+        return stripped
+    }
+
+    private fun JsonObject.toGoogleThoughtMetadata(
+        signatureOrigin: String? = null,
+        isThought: Boolean? = null,
+    ): JsonObject? {
+        val signature = this["thoughtSignature"]?.jsonPrimitive?.contentOrNull ?: return null
+        return GoogleThoughtMetadata(
+            thoughtSignature = signature,
+            signatureOrigin = signatureOrigin,
+            isThought = isThought,
+        ).toMetadata()
+    }
+
+    private fun enhanceGoogleErrorMessage(message: String): String {
+        return if (message.contains("include_server_side_tool_invocations", ignoreCase = true)) {
+            "$message\n提示：当前渠道不支持直接混用模型内置工具与函数调用，可在 Google 提供商设置中调整「内置工具与函数工具兼容」选项（如切换为「优先函数工具」或「snake_case 字段」）。"
+        } else {
+            message
         }
+    }
 
     private fun mergeGoogleMetadata(first: JsonObject?, second: JsonObject?): JsonObject? = when {
         first == null -> second

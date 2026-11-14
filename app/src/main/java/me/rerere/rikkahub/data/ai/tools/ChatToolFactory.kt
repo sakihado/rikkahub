@@ -5,7 +5,9 @@ import android.util.Log
 import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.Tool
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.GoogleBuiltInToolCompatMode
 import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.local.LocalTools
@@ -54,14 +56,16 @@ class ChatToolFactory(
         conversationId: Uuid,
         workspaceCwd: String? = null,
         workspaceHostAccess: Boolean = false,
+        providerSetting: ProviderSetting? = null,
     ): List<Tool> {
         val workspaceTools =
             createWorkspaceToolsIfReady(assistant.workspaceId?.toString(), workspaceCwd, conversationId, workspaceHostAccess)
+        val useExternalSearch = shouldUseExternalWebSearch(assistant, model)
         val tools = buildList {
             if (assistant.enableMemory) {
                 addAll(buildMemoryTools(memoryRepository, assistant.memoryId))
             }
-            if (shouldUseExternalWebSearch(assistant, model)) {
+            if (useExternalSearch) {
                 addAll(createSearchTools(settings))
             }
             addAll(localTools.getTools(assistant.localTools, conversationId))
@@ -96,6 +100,17 @@ class ChatToolFactory(
                         execute = { mcpManager.callTool(serverId, tool.name, it.jsonObject) },
                     )
                 )
+            }
+            // Google 兼容模式设置为 PREFER_FUNCTION_TOOLS 时，只要存在任意客户端函数工具，
+            // GoogleProvider 会抑制内置 googleSearch；若助手同时开启了联网搜索，这里自动回退到外部搜索。
+            if (!useExternalSearch &&
+                assistant.enableWebSearch &&
+                BuiltInTools.Search in model.tools &&
+                isNotEmpty() &&
+                providerSetting is ProviderSetting.Google &&
+                providerSetting.builtInToolCompatMode == GoogleBuiltInToolCompatMode.PREFER_FUNCTION_TOOLS
+            ) {
+                addAll(createSearchTools(settings))
             }
         }
         // 过长的输出存成文件让模型用 shell 按需读取；没有 shell 时模型读不到文件，只能原样返回。

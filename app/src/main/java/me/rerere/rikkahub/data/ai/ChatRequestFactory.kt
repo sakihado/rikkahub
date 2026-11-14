@@ -133,6 +133,7 @@ class ChatRequestFactory(
                 conversationId = conversation.id,
                 workspaceCwd = conversation.workspaceCwd,
                 workspaceHostAccess = conversation.workspaceHostAccess,
+                providerSetting = provider,
             ),
         )
     }

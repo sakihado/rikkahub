@@ -32,6 +32,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import me.rerere.ui.toast.ToastType
 import me.rerere.ai.provider.ClaudePromptCacheTtl
+import me.rerere.ai.provider.GoogleBuiltInToolCompatMode
+import me.rerere.ai.provider.GoogleCrossChannelThoughtPolicy
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.ProviderQuota
 import me.rerere.ai.provider.UsageWindow
@@ -675,6 +677,79 @@ private fun ProviderConfigureGoogle(
                 value = provider.projectId,
                 onValueChange = { onEdit(provider.copy(projectId = it.trim())) },
             )
+        }
+    }
+
+    CardGroup {
+        formItem(
+            headlineContent = { Text(stringResource(R.string.setting_provider_google_builtin_tool_compat)) },
+            supportingContent = {
+                Text(
+                    stringResource(
+                        when (provider.builtInToolCompatMode) {
+                            GoogleBuiltInToolCompatMode.STANDARD ->
+                                R.string.setting_provider_google_builtin_tool_compat_standard_desc
+                            GoogleBuiltInToolCompatMode.SNAKE_CASE_TOOL_CONFIG ->
+                                R.string.setting_provider_google_builtin_tool_compat_snake_case_desc
+                            GoogleBuiltInToolCompatMode.PREFER_FUNCTION_TOOLS ->
+                                R.string.setting_provider_google_builtin_tool_compat_prefer_tools_desc
+                        }
+                    )
+                )
+            },
+        ) {
+            ConnectedChoiceButtons(
+                options = GoogleBuiltInToolCompatMode.entries,
+                selected = provider.builtInToolCompatMode,
+                onSelect = { onEdit(provider.copy(builtInToolCompatMode = it)) },
+            ) { mode, selected ->
+                ConnectedChoiceLabel(
+                    text = when (mode) {
+                        GoogleBuiltInToolCompatMode.STANDARD ->
+                            stringResource(R.string.setting_provider_google_builtin_tool_compat_standard)
+                        GoogleBuiltInToolCompatMode.SNAKE_CASE_TOOL_CONFIG ->
+                            stringResource(R.string.setting_provider_google_builtin_tool_compat_snake_case)
+                        GoogleBuiltInToolCompatMode.PREFER_FUNCTION_TOOLS ->
+                            stringResource(R.string.setting_provider_google_builtin_tool_compat_prefer_tools)
+                    },
+                    selected = selected,
+                )
+            }
+        }
+        formItem(
+            headlineContent = { Text(stringResource(R.string.setting_provider_google_thought_signature_policy)) },
+            supportingContent = {
+                Text(
+                    stringResource(
+                        when (provider.crossChannelThoughtPolicy) {
+                            GoogleCrossChannelThoughtPolicy.SKIP_FOREIGN_THOUGHT_AND_BYPASS_TOOLS ->
+                                R.string.setting_provider_google_thought_signature_skip_foreign_desc
+                            GoogleCrossChannelThoughtPolicy.STRIP_SIGNATURE_KEEP_THOUGHT_TEXT ->
+                                R.string.setting_provider_google_thought_signature_keep_text_desc
+                            GoogleCrossChannelThoughtPolicy.PASSTHROUGH ->
+                                R.string.setting_provider_google_thought_signature_passthrough_desc
+                        }
+                    )
+                )
+            },
+        ) {
+            ConnectedChoiceButtons(
+                options = GoogleCrossChannelThoughtPolicy.entries,
+                selected = provider.crossChannelThoughtPolicy,
+                onSelect = { onEdit(provider.copy(crossChannelThoughtPolicy = it)) },
+            ) { policy, selected ->
+                ConnectedChoiceLabel(
+                    text = when (policy) {
+                        GoogleCrossChannelThoughtPolicy.SKIP_FOREIGN_THOUGHT_AND_BYPASS_TOOLS ->
+                            stringResource(R.string.setting_provider_google_thought_signature_skip_foreign)
+                        GoogleCrossChannelThoughtPolicy.STRIP_SIGNATURE_KEEP_THOUGHT_TEXT ->
+                            stringResource(R.string.setting_provider_google_thought_signature_keep_text)
+                        GoogleCrossChannelThoughtPolicy.PASSTHROUGH ->
+                            stringResource(R.string.setting_provider_google_thought_signature_passthrough)
+                    },
+                    selected = selected,
+                )
+            }
         }
     }
 }

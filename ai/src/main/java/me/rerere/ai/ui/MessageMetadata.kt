@@ -80,6 +80,8 @@ data class ServerToolMetadata(
     val result: JsonObject? = null,
     @SerialName("server_tool_result_index")
     val resultIndex: Int? = null,
+    @SerialName("signature_origin")
+    val signatureOrigin: String? = null,
 ) : PartMetadata
 
 /**
@@ -93,10 +95,18 @@ data class OpenRouterReasoningMetadata(
 
 /**
  * Google Gemini 部件的 thoughtSignature，回传时需要携带
+ *
+ * [signatureOrigin] 记录签发该签名的渠道指纹（如 vertex 项目或 AI Studio/代理标识），
+ * 用于在对话中切换渠道（尤其是切到 Vertex AI）时识别不兼容的外域签名。
+ * [isThought] 仅在纯签名占位 part 上用于标记原始 part 是否带有 `"thought": true`。
  */
 @Serializable
 data class GoogleThoughtMetadata(
     val thoughtSignature: String? = null,
+    @SerialName("signature_origin")
+    val signatureOrigin: String? = null,
+    @SerialName("is_thought")
+    val isThought: Boolean? = null,
 ) : PartMetadata
 
 /**
