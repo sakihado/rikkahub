@@ -1,0 +1,7 @@
+# Fast, platform-independent app regressions shared by local checks and CI.
+# Do not add device/root/process-tree-dependent tests here; those belong in CI.
+me.rerere.rikkahub.data.model.Conversation*Test
+me.rerere.rikkahub.data.ai.transformers.HistoryTrimTransformerTest
+me.rerere.rikkahub.data.ai.transformers.AutoHistoryTrimTest
+me.rerere.rikkahub.service.ChatDraftManagerTest
+me.rerere.rikkahub.ui.hooks.ChatInputStateTest

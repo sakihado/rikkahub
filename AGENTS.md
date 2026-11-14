@@ -32,23 +32,39 @@ Material 3 look (cards with dividers, plain forms).
 
 ### Fast Local Verification (AI Agents)
 
-When verifying code changes locally, run fast, incremental checks instead of full Release/Lint builds:
+Select a bounded scope instead of always compiling the App or recreating CI locally.
+See `tools/FAST_CHECK.md` for argument semantics, reporting and limitations.
 
-1. **Recommended one-liner (15~35s)** — merges compilation and your targeted tests into a single Gradle invocation and automatically prevents zombie processes:
-   ```bash
-   # Compile check only:
-   ./tools/fast-check.sh
+```bash
+./tools/fast-check.sh ai          # AI/provider/message compile + all AI JVM tests
+./tools/fast-check.sh app         # App Kotlin/KSP compile + core App tests (default)
+./tools/fast-check.sh resources   # Resource linking / required Manifest processing; no APK
+./tools/fast-check.sh web         # Frontend type generation + TypeScript check; no Gradle
+./tools/fast-check.sh pre-push    # Once ready: AI + App compile/resources + core App tests
+./tools/fast-check.sh pre-push --with-web  # Include frontend checks when web-ui changed
+./tools/fast-check.sh app --tests '*ConversationSignatureRecoveryTest'
+./tools/fast-check.sh pre-push --plan     # Inspect commands only; NOT verification
+```
 
-   # Compile check + targeted JVM tests:
-   ./tools/fast-check.sh :ai:testDebugUnitTest
-   ./tools/fast-check.sh :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.ChatMessageCotTest"
-   ```
-2. **Do NOT run full `spotlessCheck` for routine verification**:
-   `spotless` uses `ratchetFrom("origin/master")`. On long-lived feature branches, it parses syntax trees for 100+ accumulated files, taking 8+ minutes on device CPUs and failing on pre-existing branch violations. GitHub Actions CI does not run or block on `spotlessCheck`. If you want to format only what you changed, run `./gradlew spotlessApply`.
-3. **Never pass `--daemon` in PRoot**:
-   PRoot lacks systemd/cgroup orphan process reaping. Interrupted daemons remain in a "busy" zombie state and stall subsequent runs. Always use `--no-daemon` and single-invocation tasks.
-4. **Never run `assembleGithubRelease` or `bundlePlayRelease` locally**:
-   R8 full minification exhausts physical RAM and stalls in ZRAM swap. Leave Release/AAB builds and full Lint to CI. Follow `/workspace/LOCAL_BUILD.md` for container-specific constraints.
+- Use module checks during the editing loop, then one integration check per completed batch.
+  Public models/interfaces and cross-module changes require the integration pass.
+- `app` / `pre-push` use `tools/app-core-tests.txt`, shared with CI. An explicit `--tests`
+  replaces the default App filters. Quote spaces/wildcards. Legacy explicit `:task` calls
+  remain supported but no longer prepend App compilation.
+- One Gradle invocation per check, with `--no-daemon`; keep existing memory limits/caches.
+  Do not use `clean`, `--rerun-tasks` or parallel wrapper invocations routinely. The wrapper
+  uses a per-checkout lock and does not unconditionally stop other daemons. Interrupted PRoot
+  tasks may still need targeted cleanup; this is not a guarantee of no orphan processes.
+- The wrapper checks staged/unstaged whitespace and retains logs/result under Git metadata.
+  Inspect the current command result/JUnit reports, not stale reports or notifications alone.
+- Do not run full `spotlessCheck` **or `spotlessApply`** for routine fast verification: both
+  use the `origin/master` ratchet and can touch/check historical branch changes. Format only
+  explicitly selected edited files. `git diff --check` is not a full formatter/linter.
+- Never run local Release/AAB/R8 as a routine check. Leave APK builds and host/device-sensitive
+  tests to Actions. The current branch workflow does not claim full Android Lint, emulator
+  coverage or live API verification. Follow `/workspace/LOCAL_BUILD.md` for device constraints.
+- No fixed time or percentage-of-bugs guarantee. Test execution is often cheap; compilation,
+  configuration and cache misses dominate. Run long checks in the background and report progress.
 
 App 有一个 `distribution` 维度的 product flavor：`github`（默认）和 `play`，共用同一个 applicationId。
 渠道差异用 `BuildConfig.IS_PLAY_STORE` 判断（如 Play 版不检查更新、不显示更新提醒）。

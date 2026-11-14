@@ -14,8 +14,12 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Test local verification wrapper
+        run: python3 -m unittest discover -s tools/tests -p 'test_fast_check.py' -v
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -45,6 +49,10 @@ jobs:
       - name: Install web-ui dependencies
         working-directory: web-ui
         run: pnpm install --frozen-lockfile
+
+      - name: Typecheck web-ui
+        working-directory: web-ui
+        run: pnpm run typecheck
 
       - name: Prepare build files
         run: |
@@ -82,13 +90,33 @@ jobs:
       - name: Run unit tests
         run: |
           chmod +x gradlew
-          ./gradlew :workspace:testDebugUnitTest --build-cache
-          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.hostshell.*" --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --tests "me.rerere.rikkahub.data.model.ConversationConfigTest" --tests "me.rerere.rikkahub.data.model.ConversationForkTest" --tests "me.rerere.rikkahub.data.ai.transformers.HistoryTrimTransformerTest" --tests "me.rerere.rikkahub.data.ai.transformers.AutoHistoryTrimTest" --tests "me.rerere.rikkahub.service.ChatDraftManagerTest" --tests "me.rerere.rikkahub.ui.hooks.ChatInputStateTest" --build-cache
-          ./gradlew --stop
+          args=(:ai:testDebugUnitTest :workspace:testDebugUnitTest :app:testGithubDebugUnitTest)
+          while IFS= read -r pattern || [[ -n "$pattern" ]]; do
+            [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+            args+=(--tests "$pattern")
+          done < tools/app-core-tests.txt
+          args+=(--tests "me.rerere.rikkahub.hostshell.*")
+          args+=(--tests "me.rerere.rikkahub.phoneuse.*")
+          args+=(--tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest")
+          ./gradlew "${args[@]}" --build-cache --no-daemon --console=plain
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: |
+            ai/build/test-results/testDebugUnitTest/
+            workspace/build/test-results/testDebugUnitTest/
+            app/build/test-results/testGithubDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build:
     name: Build APKs (arm64)
+    needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -173,4 +201,5 @@ jobs:
         with:
           name: rikkahub-apks
           path: out/*.apk
+          if-no-files-found: error
           retention-days: 14
