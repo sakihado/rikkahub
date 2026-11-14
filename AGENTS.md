@@ -32,12 +32,23 @@ Material 3 look (cards with dividers, plain forms).
 
 ### Fast Local Verification (AI Agents)
 
-When verifying code changes locally, prefer fast, incremental checks instead of full Release/Lint builds:
+When verifying code changes locally, run fast, incremental checks instead of full Release/Lint builds:
 
-1. `./gradlew spotlessCheck` — check formatting/imports on modified files
-2. `./gradlew :app:compileGithubDebugKotlin` — catch Kotlin/Compose/KSP compilation errors without full APK packaging
-3. Run targeted JVM unit tests for the module(s) or test classes you touched (e.g. `./gradlew :ai:testDebugUnitTest`, `./gradlew :app:testGithubDebugUnitTest --tests "..."`)
-4. **Do not** run `assembleGithubRelease` or `bundlePlayRelease` in constrained/PRoot environments (R8 minification requires high physical RAM); leave Release builds and full Lint to CI. If `/workspace/LOCAL_BUILD.md` exists in the parent workspace, follow its container-specific flags (e.g. `taskset -c 4-7`).
+1. **Recommended one-liner (15~35s)** — merges compilation and your targeted tests into a single Gradle invocation and automatically prevents zombie processes:
+   ```bash
+   # Compile check only:
+   ./tools/fast-check.sh
+
+   # Compile check + targeted JVM tests:
+   ./tools/fast-check.sh :ai:testDebugUnitTest
+   ./tools/fast-check.sh :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.ChatMessageCotTest"
+   ```
+2. **Do NOT run full `spotlessCheck` for routine verification**:
+   `spotless` uses `ratchetFrom("origin/master")`. On long-lived feature branches, it parses syntax trees for 100+ accumulated files, taking 8+ minutes on device CPUs and failing on pre-existing branch violations. GitHub Actions CI does not run or block on `spotlessCheck`. If you want to format only what you changed, run `./gradlew spotlessApply`.
+3. **Never pass `--daemon` in PRoot**:
+   PRoot lacks systemd/cgroup orphan process reaping. Interrupted daemons remain in a "busy" zombie state and stall subsequent runs. Always use `--no-daemon` and single-invocation tasks.
+4. **Never run `assembleGithubRelease` or `bundlePlayRelease` locally**:
+   R8 full minification exhausts physical RAM and stalls in ZRAM swap. Leave Release/AAB builds and full Lint to CI. Follow `/workspace/LOCAL_BUILD.md` for container-specific constraints.
 
 App 有一个 `distribution` 维度的 product flavor：`github`（默认）和 `play`，共用同一个 applicationId。
 渠道差异用 `BuildConfig.IS_PLAY_STORE` 判断（如 Play 版不检查更新、不显示更新提醒）。
