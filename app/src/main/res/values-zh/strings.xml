@@ -1908,4 +1908,17 @@ mDNS 地址：使用 .local 主机名，同一网络中的其他设备可通过�
   <string name="tool_ui_android_shell">宿主命令: %1$s</string>
   <string name="tool_ui_android_shell_default">Android 宿主终端</string>
   <string name="tool_ui_android_shell_blocked">已被安全策略拦截</string>
+
+  <!-- 自动裁剪历史工具输出 -->
+  <string name="auto_trim_title">自动裁剪历史工具输出</string>
+  <string name="auto_trim_hint">长任务中较早的工具与搜索输出累积过大时，自动折叠成一行占位说明，保留最近几步的完整结果。任一滑块在最左端即关闭。</string>
+  <string name="auto_trim_off">关</string>
+  <string name="auto_trim_keep_steps">保留最近步数</string>
+  <string name="auto_trim_keep_steps_desc">最近这么多步的工具输出保持完整，更早的才裁剪。</string>
+  <string name="auto_trim_keep_steps_value">%1$d 步</string>
+  <string name="auto_trim_min_free">最小释放体积</string>
+  <string name="auto_trim_min_free_desc">一次至少能省下这么多才动手，避免为一点体积反复让提示词缓存失效。</string>
+  <string name="auto_trim_context">上下文水位</string>
+  <string name="auto_trim_context_desc">上下文占用达到这个大小后，才在工具执行完的间隙做一次批量裁剪。</string>
+  <string name="auto_trim_context_value">%1$d K</string>
 </resources>

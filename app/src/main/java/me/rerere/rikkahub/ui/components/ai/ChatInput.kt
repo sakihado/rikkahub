@@ -343,6 +343,21 @@ fun ChatInput(
                                         onlyIcon = true,
                                     )
                                 }
+
+                                // 自动裁剪历史工具输出
+                                AutoTrimButton(
+                                    config = assistant.autoTrimConfig(),
+                                    onUpdateConfig = { config ->
+                                        onUpdateAssistant(
+                                            assistant.copy(
+                                                autoTrimKeepSteps = config.keepRecentSteps,
+                                                autoTrimMinFreeKb = (config.minFreeBytes / 1024L).toInt(),
+                                                autoTrimContextK = config.contextTokens / 1024,
+                                            )
+                                        )
+                                    },
+                                    onlyIcon = true,
+                                )
                             }
 
                             if (runningBackgroundTasks > 0) {

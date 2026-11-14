@@ -83,7 +83,7 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :workspace:testDebugUnitTest --build-cache
-          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.hostshell.*" --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --tests "me.rerere.rikkahub.data.model.ConversationConfigTest" --tests "me.rerere.rikkahub.data.model.ConversationForkTest" --tests "me.rerere.rikkahub.data.ai.transformers.HistoryTrimTransformerTest" --tests "me.rerere.rikkahub.service.ChatDraftManagerTest" --tests "me.rerere.rikkahub.ui.hooks.ChatInputStateTest" --build-cache
+          ./gradlew :app:testGithubDebugUnitTest --tests "me.rerere.rikkahub.hostshell.*" --tests "me.rerere.rikkahub.phoneuse.*" --tests "me.rerere.rikkahub.data.ai.tools.PhoneUseToolTest" --tests "me.rerere.rikkahub.data.model.ConversationConfigTest" --tests "me.rerere.rikkahub.data.model.ConversationForkTest" --tests "me.rerere.rikkahub.data.ai.transformers.HistoryTrimTransformerTest" --tests "me.rerere.rikkahub.data.ai.transformers.AutoHistoryTrimTest" --tests "me.rerere.rikkahub.service.ChatDraftManagerTest" --tests "me.rerere.rikkahub.ui.hooks.ChatInputStateTest" --build-cache
           ./gradlew --stop
 
   build:

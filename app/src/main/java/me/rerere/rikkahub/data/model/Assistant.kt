@@ -8,6 +8,7 @@ import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.CustomHeader
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.ai.util.AutoTrimConfig
 import me.rerere.rikkahub.data.ai.tools.local.LocalToolOption
 import me.rerere.rikkahub.utils.SimpleCache
 import java.util.concurrent.TimeUnit
@@ -36,6 +37,10 @@ data class Assistant(
     val quickMessageIds: Set<Uuid> = emptySet(),
     val regexes: List<AssistantRegex> = emptyList(),
     val reasoningLevel: ReasoningLevel = ReasoningLevel.AUTO,
+    // 长任务中自动裁剪较早的工具输出；三个值任一为 0 视为关闭
+    val autoTrimKeepSteps: Int = 0,      // 保留最近多少个工具步骤的完整输出
+    val autoTrimMinFreeKb: Int = 0,      // 一次至少释放多少 KB 才动手
+    val autoTrimContextK: Int = 0,       // 上下文占用达到多少 K token 后开始考虑裁剪
     val maxTokens: Int? = null,
     val customHeaders: List<CustomHeader> = emptyList(),
     val customBodies: List<CustomBody> = emptyList(),
@@ -52,7 +57,14 @@ data class Assistant(
     val enableTimeReminder: Boolean = false, // 时间间隔提醒注入
     val timeReminderIntervalMinutes: Int = 60, // 时间提醒间隔（分钟，至少 1 分钟）
     val allowConversationSystemPrompt: Boolean = false, // 允许对话单独重写 system prompt
-)
+) {
+    /** 自动裁剪配置；滑块值为 0（最左端）时对应条件视为关闭 */
+    fun autoTrimConfig(): AutoTrimConfig = AutoTrimConfig(
+        keepRecentSteps = autoTrimKeepSteps.coerceAtLeast(0),
+        minFreeBytes = autoTrimMinFreeKb.coerceAtLeast(0) * 1024L,
+        contextTokens = autoTrimContextK.coerceAtLeast(0) * 1024,
+    )
+}
 
 @Serializable
 data class QuickMessage(
