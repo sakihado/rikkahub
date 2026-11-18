@@ -55,6 +55,7 @@ import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.canContinueFromBreakpoint
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.model.Conversation
@@ -92,6 +93,7 @@ fun ChatList(
     onDismissError: (Uuid) -> Unit = {},
     onClearAllErrors: () -> Unit = {},
     onRegenerate: (UIMessage) -> Unit = {},
+    onContinue: (Uuid) -> Unit = {},
     onEdit: (UIMessage) -> Unit = {},
     onForkMessage: (UIMessage) -> Unit = {},
     onDelete: (UIMessage) -> Unit = {},
@@ -155,6 +157,7 @@ fun ChatList(
                 onDismissError = onDismissError,
                 onClearAllErrors = onClearAllErrors,
                 onRegenerate = onRegenerate,
+                onContinue = onContinue,
                 onEdit = onEdit,
                 onForkMessage = onForkMessage,
                 onDelete = onDelete,
@@ -230,6 +233,7 @@ private fun ChatListNormal(
     onDismissError: (Uuid) -> Unit,
     onClearAllErrors: () -> Unit,
     onRegenerate: (UIMessage) -> Unit,
+    onContinue: (Uuid) -> Unit,
     onEdit: (UIMessage) -> Unit,
     onForkMessage: (UIMessage) -> Unit,
     onDelete: (UIMessage) -> Unit,
@@ -374,6 +378,9 @@ private fun ChatListNormal(
                                 ?: node.currentMessage.snapshotModel(),
                             assistant = assistant,
                             loading = loading && !compressing && index == lastMessageIndex,
+                            onContinue = if (!loading && !compressing && index == lastMessageIndex && node.currentMessage.canContinueFromBreakpoint()) {
+                                { onContinue(node.currentMessage.id) }
+                            } else null,
                             onRegenerate = {
                                 onRegenerate(node.currentMessage)
                             },
@@ -472,6 +479,10 @@ private fun ChatListNormal(
             // 错误消息卡片
             ErrorCardsDisplay(
                 errors = errors,
+                onContinue = { id -> onContinue(id) },
+                resumableId = conversation.messageNodes.lastOrNull()?.currentMessage?.takeIf {
+                    !loading && !compressing && it.canContinueFromBreakpoint()
+                }?.id,
                 onDismissError = onDismissError,
                 onClearAllErrors = onClearAllErrors,
                 modifier = Modifier

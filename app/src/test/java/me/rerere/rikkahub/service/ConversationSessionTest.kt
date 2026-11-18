@@ -31,6 +31,26 @@ import kotlin.uuid.Uuid
 
 class ConversationSessionTest {
     @Test
+    fun `only interrupted tail can claim resume slot and double tap never replaces first job`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val id = Uuid.random()
+            val reply = UIMessage.assistant("").copy(parts = listOf(UIMessagePart.Tool("a", "read", "{}")),
+                committedPartCount = 1, stopReason = me.rerere.ai.ui.AssistantStopReason.ERROR)
+            val store = FakeConversationStore(Conversation.ofId(id).updateCurrentMessages(listOf(reply)))
+            val session = ConversationSession(id, Conversation.ofId(id), scope, store, {})
+            session.initialize(load = { store.persisted })
+            assertFalse(session.startBreakpointJob(Uuid.random()) { error("wrong target") })
+            val job = scope.launch(start = CoroutineStart.LAZY) { awaitCancellation() }
+            assertTrue(session.startBreakpointJob(reply.id) { job })
+            assertFalse(session.startBreakpointJob(reply.id) { error("second tap") })
+            assertTrue(job.isActive)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `metadata edits survive reopening and final generation save`() = runBlocking {
         val id = Uuid.random()
         val oldAssistant = Uuid.random()

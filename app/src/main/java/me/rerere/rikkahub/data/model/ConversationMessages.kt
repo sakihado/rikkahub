@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.data.model
 
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.ui.AssistantStopReason
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -71,33 +72,27 @@ internal fun Conversation.withNodeFavorite(nodeId: Uuid, favorite: Boolean): Con
  * 当前分支里没有这个还在等待审批的工具调用时返回 null，用来忽略重复点击和对已完成或非当前分支工具的过期审批。
  */
 internal fun Conversation.withToolApproval(toolCallId: String, approvalState: ToolApprovalState): Conversation? {
-    if (currentMessages.none { message ->
-            message.getTools().any { it.toolCallId == toolCallId && it.isPending }
-        }) {
-        return null
+    val target = currentMessages.lastOrNull { message ->
+        message.getTools().any { it.toolCallId == toolCallId && it.isPending }
+    } ?: return null
+    return updateMessageById(target.id) { message ->
+        message.copy(parts = message.parts.map { part ->
+            if (part is UIMessagePart.Tool && part.toolCallId == toolCallId && part.isPending) {
+                part.copy(approvalState = approvalState, outcomeUnknown = false)
+            } else part
+        })
     }
-    return copy(
-        messageNodes = messageNodes.map { node ->
-            node.copy(messages = node.messages.map { message ->
-                message.copy(parts = message.parts.map { part ->
-                    if (part is UIMessagePart.Tool && part.toolCallId == toolCallId) {
-                        part.copy(approvalState = approvalState)
-                    } else {
-                        part
-                    }
-                })
-            })
-        }
-    )
 }
 
 /**
  * 生成被停止时，最后一条消息里还没执行的工具补上取消的结果，否则这条消息之后没法继续发给模型。
  * 没有需要补的工具时返回 null。
  */
+internal fun UIMessage.withInterruptedTools() = finishPendingTools(::cancelToolByUser)
+
 internal fun Conversation.cancelInterruptedTools(): Conversation? {
     val lastNode = messageNodes.lastOrNull() ?: return null
-    val updatedMessage = lastNode.currentMessage.finishPendingTools(::cancelToolByUser)
+    val updatedMessage = lastNode.currentMessage.withInterruptedTools()
     if (updatedMessage === lastNode.currentMessage) return null
     return upsertMessage(lastNode.id, updatedMessage)
 }
@@ -105,12 +100,25 @@ internal fun Conversation.cancelInterruptedTools(): Conversation? {
 private fun cancelToolByUser(tool: UIMessagePart.Tool): UIMessagePart.Tool = tool.copy(
     output = listOf(
         UIMessagePart.Text(
-            """{"status":"cancelled","error":"Generation cancelled by user before tool execution completed."}"""
+            """{"status":"cancelled","error":"Generation interrupted before a final tool result was saved."}"""
         )
     ),
+    isInterrupted = true,
     // 执行到一半被停止的工具，耗时算到取消为止
     finishedAt = tool.finishedAt ?: tool.startedAt?.let { Clock.System.now() },
 )
+
+/** Only a new-format, in-flight checkpoint is evidence of an interrupted run. Normal pending
+ * approvals survive a restart. Loading history never starts a job. */
+internal fun Conversation.recoverInterruptedTurn(): Conversation {
+    val message = messageNodes.lastOrNull()?.currentMessage ?: return this
+    val orphan = message.stopReason == AssistantStopReason.RUNNING ||
+        (message.stopReason == AssistantStopReason.AWAITING_APPROVAL && message.getTools().none { it.isPending })
+    if (!orphan) return this
+    return updateMessageById(message.id) { current ->
+        current.finishPendingTools(::cancelToolByUser).copy(stopReason = AssistantStopReason.ERROR)
+    }
+}
 
 /** Recovery is a replay preference, not deletion of persisted signatures or content. */
 internal fun Conversation.withGoogleThoughtSignaturesIgnored(messageId: Uuid, ignored: Boolean): Conversation =

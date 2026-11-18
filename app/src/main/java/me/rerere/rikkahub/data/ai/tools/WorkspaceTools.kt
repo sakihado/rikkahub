@@ -107,6 +107,7 @@ private fun createReadFileTool(
     hostAccess: Boolean,
 ) = Tool(
     name = "workspace_read_file",
+    isReadOnly = true,
     description = """
         Read a file using the assistant's bound workspace Rootfs. Paths must be absolute inside Rootfs.
         Use ${layout.workspaceDir} for the workspace files area.

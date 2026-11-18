@@ -83,12 +83,12 @@ internal class ChatCompletionsStreamDecoder : StreamChunkDecoder {
         return DecodeResult(chunks)
     }
 
-    override fun onClosed(): List<StreamChunk> = finish()
+    override fun onClosed(): List<StreamChunk> = finish(protocolCompleted = finishReason != null)
 
-    private fun finish(): List<StreamChunk> {
+    private fun finish(protocolCompleted: Boolean = true): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
-        return streamState.finish(finishReason, responseId, responseModel)
+        return streamState.finish(finishReason, responseId, responseModel, protocolCompleted)
     }
 
     private fun parseMessage(payload: JsonObject): UIMessage {
@@ -242,12 +242,12 @@ internal class ChatCompletionsStreamDecoder : StreamChunkDecoder {
             if (message.annotations.isNotEmpty()) add(StreamChunk.Annotations(message.annotations))
         }
 
-        fun finish(reason: String?, responseId: String?, model: String?): List<StreamChunk> = buildList {
+        fun finish(reason: String?, responseId: String?, model: String?, protocolCompleted: Boolean): List<StreamChunk> = buildList {
             addAll(closeText())
             addAll(closeReasoning())
             addAll(closeImage())
             addAll(closeTools())
-            add(StreamChunk.Finish(reason, responseId, model))
+            add(StreamChunk.Finish(reason, responseId, model, protocolCompleted))
         }
 
         private fun closeText() = textId?.let {

@@ -489,6 +489,8 @@ class ChatVM(
         )
     }
 
+    fun continueFromBreakpoint(id: Uuid) = chatService.continueFromBreakpoint(_conversationId, id)
+
     fun regenerateAtMessage(message: UIMessage) {
         analytics.logEvent("ai_regenerate_at_message", null)
         chatService.regenerateAtMessage(_conversationId, message.id)

@@ -155,15 +155,15 @@ internal class ClaudeStreamDecoder : StreamChunkDecoder {
         }
     }
 
-    override fun onClosed(): List<StreamChunk> = finish()
+    override fun onClosed(): List<StreamChunk> = finish(protocolCompleted = false)
 
-    private fun finish(): List<StreamChunk> {
+    private fun finish(protocolCompleted: Boolean = true): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
         return buildList {
             blocks.values.mapNotNull(::endBlock).forEach(::add)
             blocks.clear()
-            add(StreamChunk.Finish(finishReason, responseId, responseModel))
+            add(StreamChunk.Finish(finishReason, responseId, responseModel, protocolCompleted))
         }
     }
 

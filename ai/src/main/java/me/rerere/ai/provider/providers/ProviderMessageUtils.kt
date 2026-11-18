@@ -45,6 +45,8 @@ internal fun groupPartsByToolBoundary(parts: List<UIMessagePart>): List<PartGrou
     for (part in parts) {
         if (part is UIMessagePart.Tool && part.isExecuted) {
             flushContent()
+            val previous = currentTools.lastOrNull()?.stepIndex
+            if (previous != null && part.stepIndex != null && previous != part.stepIndex) flushTools()
             currentTools.add(part)
         } else {
             flushTools()

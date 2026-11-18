@@ -1,0 +1,11 @@
+<resources>
+    <string name="agent_continue">Continue from here</string>
+    <string name="agent_continue_short">Continue</string>
+    <string name="agent_regenerate_all">Regenerate entire reply</string>
+    <string name="agent_interrupted">Generation was interrupted. Completed steps have been kept.</string>
+    <string name="agent_step_limit">Step limit reached. The task is paused.</string>
+    <string name="agent_truncated">Output limit reached during a tool call. Consider increasing the output limit before continuing.</string>
+    <string name="agent_unknown_result">The last attempt may already have taken effect. Its result was not saved.</string>
+    <string name="agent_tool_skip">Skip and verify</string>
+    <string name="agent_tool_rerun">Run again</string>
+</resources>

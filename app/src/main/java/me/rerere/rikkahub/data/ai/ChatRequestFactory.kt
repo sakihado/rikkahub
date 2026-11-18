@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
+import me.rerere.ai.ui.withoutUncommittedPreview
 import me.rerere.ai.agent.AgentHooks
 import me.rerere.ai.agent.AgentRequest
 import me.rerere.ai.agent.RetryPolicy
@@ -268,7 +269,7 @@ class ChatRequestFactory(
             if (system.isNotBlank()) {
                 add(UIMessage.system(prompt = system).copy(isSynthetic = true))
             }
-            addAll(messages.limitContext(assistant.contextMessageLimit).withContinuationHint())
+            addAll(messages.map { it.withoutUncommittedPreview() }.limitContext(assistant.contextMessageLimit).withContinuationHint())
         }.transforms(
             transformers = inputTransformers,
             context = context,

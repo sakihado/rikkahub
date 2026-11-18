@@ -22,6 +22,7 @@ fun createSearchTools(settings: Settings): Set<Tool> {
         add(
             Tool(
                 name = "search_web",
+                isReadOnly = true,
                 description = """
                     Search the web for up-to-date or specific information.
                     Use this when the user asks for the latest news, current facts, or needs verification.
@@ -94,6 +95,7 @@ fun createSearchTools(settings: Settings): Set<Tool> {
             add(
                 Tool(
                     name = "scrape_web",
+                    isReadOnly = true,
                     description = """
                         Scrape a URL for detailed page content.
                         Use this when the user requests content from a specific page, when search snippets are insufficient,

@@ -73,7 +73,7 @@ internal class InteractionsStreamDecoder(
         }
     }
 
-    override fun onClosed(): List<StreamChunk> = finish()
+    override fun onClosed(): List<StreamChunk> = finish(protocolCompleted = false)
 
     private fun captureInteraction(interaction: JsonObject?) {
         if (interaction == null) return
@@ -249,14 +249,14 @@ internal class InteractionsStreamDecoder(
         else -> emptyList()
     }
 
-    private fun finish(): List<StreamChunk> {
+    private fun finish(protocolCompleted: Boolean = true): List<StreamChunk> {
         if (finished) return emptyList()
         finished = true
         return buildList {
             // 连接提前断开时，未完成的服务端工具结果没有可回传的内容，不物化
             steps.values.filterNot { isInteractionsServerToolResult(it.type) }.forEach { addAll(closeStep(it)) }
             steps.clear()
-            add(StreamChunk.Finish(status, interactionId, model ?: fallbackModel))
+            add(StreamChunk.Finish(status, interactionId, model ?: fallbackModel, protocolCompleted))
         }
     }
 

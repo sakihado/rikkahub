@@ -57,6 +57,9 @@ interface AgentHooks {
      */
     suspend fun pendingParts(): List<UIMessagePart> = emptyList()
 
+    /** Synchronous persistence barrier, never called for streaming previews. Failure stops the loop. */
+    suspend fun onCheckpoint(message: UIMessage) {}
+
     /**
      * 一批工具执行完、再次请求模型之前调用，返回 true 时以 [AgentFinishReason.Paused] 结束这次运行。
      *
@@ -93,6 +96,8 @@ sealed interface AgentFinishReason {
 
     /** 达到 [AgentRequest.maxSteps]，最后一步调用的工具已经执行，但模型还没有回复 */
     data object StepLimitReached : AgentFinishReason
+
+    data object Truncated : AgentFinishReason
 }
 
 /**

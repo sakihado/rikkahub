@@ -73,6 +73,7 @@ fun ColumnScope.ChatMessageActionButtons(
     node: MessageNode,
     onUpdate: (MessageNode) -> Unit,
     onRegenerate: () -> Unit,
+    onContinue: (() -> Unit)? = null,
     onOpenActionSheet: () -> Unit,
     onTranslate: ((UIMessage, Locale) -> Unit)? = null,
     onClearTranslation: (UIMessage) -> Unit = {},
@@ -80,6 +81,7 @@ fun ColumnScope.ChatMessageActionButtons(
     val context = LocalContext.current
     val settings = LocalSettings.current
     var isPendingDelete by remember { mutableStateOf(false) }
+    var chooseRetry by remember(message.id) { mutableStateOf(false) }
     var showTranslateDialog by remember { mutableStateOf(false) }
     var showRegenerateConfirm by remember { mutableStateOf(false) }
 
@@ -100,12 +102,17 @@ fun ColumnScope.ChatMessageActionButtons(
             onClick = { context.copyMessageToClipboard(message) },
         )
 
+        if (onContinue != null && message.stopReason == me.rerere.ai.ui.AssistantStopReason.CANCELLED) {
+            androidx.compose.material3.TextButton(onClick = onContinue) { Text(stringResource(R.string.agent_continue_short)) }
+        }
         ChatMessageActionButton(
             icon = HugeIcons.Refresh03,
             contentDescription = stringResource(R.string.regenerate),
             onClick = {
                 if (message.role == MessageRole.USER) {
                     showRegenerateConfirm = true
+                } else if (onContinue != null) {
+                    chooseRetry = true
                 } else {
                     onRegenerate()
                 }
@@ -201,6 +208,19 @@ fun ColumnScope.ChatMessageActionButtons(
         )
     }
 
+    if (chooseRetry && onContinue != null) {
+        ModalBottomSheet(onDismissRequest = { chooseRetry = false }) {
+            listOf(R.string.agent_continue, R.string.agent_regenerate_all).forEachIndexed { index, title ->
+                SegmentedListItem(
+                    onClick = {
+                        chooseRetry = false
+                        if (index == 0) onContinue() else onRegenerate()
+                    },
+                    shapes = ListItemDefaults.segmentedShapes(index = index, count = 2),
+                ) { Text(stringResource(title)) }
+            }
+        }
+    }
     // Regenerate confirmation dialog
     RikkaConfirmDialog(
         show = showRegenerateConfirm,

@@ -452,6 +452,7 @@ private fun ChatPageContent(
                 errors = errors,
                 onDismissError = onDismissError,
                 onClearAllErrors = onClearAllErrors,
+                onContinue = vm::continueFromBreakpoint,
                 onRegenerate = {
                     vm.regenerateAtMessage(it)
                 },

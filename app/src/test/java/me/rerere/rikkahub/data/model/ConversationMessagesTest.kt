@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.data.model
 
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.ui.AssistantStopReason
+import me.rerere.ai.ui.prepareForResume
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -130,6 +132,36 @@ class ConversationMessagesTest {
 
         assertNull(conversation.cancelInterruptedTools())
         assertNull(Conversation.ofId(Uuid.random()).cancelInterruptedTools())
+    }
+
+    @Test
+    fun `cold start or stop never silently retry unknown Auto or Approved effects`() {
+        for (state in listOf(ToolApprovalState.Auto, ToolApprovalState.Approved)) {
+            val finished = UIMessagePart.Tool("a", "write", "{}", output = listOf(UIMessagePart.Text("ok")))
+            val started = UIMessagePart.Tool("b", "write", "{}", approvalState = state, outcomeUnknown = true)
+            val original = UIMessage.assistant("").copy(parts = listOf(finished, started),
+                committedPartCount = 2, stopReason = AssistantStopReason.RUNNING)
+            val cold = conversationOf(original.toMessageNode()).recoverInterruptedTurn().currentMessages.single()
+            val stopped = conversationOf(original.copy(stopReason = AssistantStopReason.CANCELLED).toMessageNode())
+                .cancelInterruptedTools()!!.currentMessages.single()
+            for (message in listOf(cold, stopped)) {
+                val prepared = checkNotNull(message.prepareForResume())
+                assertEquals(finished, prepared.parts.first())
+                val uncertain = prepared.getTools().last()
+                assertTrue(uncertain.isPending && uncertain.outcomeUnknown)
+                val conversation = conversationOf(prepared.toMessageNode())
+                assertEquals(conversation, conversation.recoverInterruptedTurn())
+                val skipped = conversation.withToolApproval("b", ToolApprovalState.Denied("verify"))!!
+                assertEquals(ToolApprovalState.Denied("verify"), skipped.currentMessages.single().getTools().last().approvalState)
+            }
+        }
+    }
+
+    @Test
+    fun `legacy history and completed replies never become resume targets`() {
+        val old = toolReply(ToolApprovalState.Approved)
+        assertNull(old.copy(stopReason = AssistantStopReason.ERROR).prepareForResume())
+        assertNull(old.copy(committedPartCount = 1, stopReason = AssistantStopReason.COMPLETED).prepareForResume())
     }
 
     private fun conversationOf(vararg nodes: MessageNode) =

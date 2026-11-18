@@ -50,6 +50,8 @@ import kotlin.uuid.Uuid
 @Composable
 fun ErrorCardsDisplay(
     errors: List<ChatError>,
+    resumableId: Uuid? = null,
+    onContinue: (Uuid) -> Unit = {},
     onDismissError: (Uuid) -> Unit,
     onClearAllErrors: () -> Unit,
     modifier: Modifier = Modifier,
@@ -95,6 +97,7 @@ fun ErrorCardsDisplay(
             errors.forEach { error ->
                 ErrorCard(
                     error = error,
+                    onContinue = error.resumeMessageId?.takeIf { it == resumableId }?.let { { onContinue(it) } },
                     onDismiss = { onDismissError(error.id) },
                 )
             }
@@ -105,6 +108,7 @@ fun ErrorCardsDisplay(
 @Composable
 fun ErrorCard(
     error: ChatError,
+    onContinue: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -152,6 +156,9 @@ fun ErrorCard(
                     color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (onContinue != null) {
+                    androidx.compose.material3.TextButton(onClick = onContinue) { Text(stringResource(R.string.agent_continue)) }
+                }
                 if (error.solution == ChatErrorSolution.CheckFastModelSettings) {
                     Text(
                         text = buildAnnotatedString {

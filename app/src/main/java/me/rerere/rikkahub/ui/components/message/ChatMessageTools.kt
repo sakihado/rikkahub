@@ -223,7 +223,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                 overflow = TextOverflow.Ellipsis,
             )
         },
-        extra = if (isPending && onToolApproval != null) {
+        extra = if (isPending && tool.outcomeUnknown) null else if (isPending && onToolApproval != null) {
             {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -309,6 +309,20 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         },
     )
 
+    if (isPending && tool.outcomeUnknown && onToolApproval != null) {
+        Column(Modifier.padding(8.dp)) {
+            Text(stringResource(R.string.agent_unknown_result), color = MaterialTheme.colorScheme.error)
+            FlowRow {
+                TextButton(onClick = { onToolApproval(tool.toolCallId, false,
+                    "Previous attempt may have taken effect. Do not replay it; verify state before continuing.") }) {
+                    Text(stringResource(R.string.agent_tool_skip))
+                }
+                FilledTonalButton(onClick = { onToolApproval(tool.toolCallId, true, "") }) {
+                    Text(stringResource(R.string.agent_tool_rerun))
+                }
+            }
+        }
+    }
     if (showDenyDialog && onToolApproval != null) {
         ToolDenyReasonDialog(
             onDismiss = { showDenyDialog = false },

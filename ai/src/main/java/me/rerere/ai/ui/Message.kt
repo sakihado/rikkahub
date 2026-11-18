@@ -35,6 +35,8 @@ data class UIMessage(
     val lastUsage: TokenUsage? = null,
     // 这条消息累计请求了多少次模型（多轮工具调用共用同一条消息）
     val stepCount: Int? = null,
+    val committedPartCount: Int? = null,
+    val stopReason: AssistantStopReason? = null,
     val translation: String? = null,
     // 压缩检查点：此消息是它之前全部历史的摘要，组装请求时从最后一个检查点开始取
     val isContextCheckpoint: Boolean = false,

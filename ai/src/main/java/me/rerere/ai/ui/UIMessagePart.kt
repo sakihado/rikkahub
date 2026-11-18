@@ -191,6 +191,12 @@ sealed class UIMessagePart {
         // 本地执行的起止时间，只统计真正运行工具的耗时；拒绝、问答和旧消息都为空
         val startedAt: Instant? = null,
         val finishedAt: Instant? = null,
+        val stepIndex: Int? = null,
+        // Non-tool parts after this call in the same response (e.g. Vertex signed empty parts).
+        val followingPartCount: Int = 0,
+        val isInterrupted: Boolean = false,
+        // Set durably BEFORE a side effect; cleared only by a result or an explicit retry decision.
+        val outcomeUnknown: Boolean = false,
     ) : UIMessagePart() {
         /** Whether the tool has been executed (has output) */
         val isExecuted: Boolean get() = output.isNotEmpty()

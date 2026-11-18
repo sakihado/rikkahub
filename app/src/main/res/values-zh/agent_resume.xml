@@ -1,0 +1,11 @@
+<resources>
+    <string name="agent_continue">从此处继续</string>
+    <string name="agent_continue_short">继续</string>
+    <string name="agent_regenerate_all">整条重新生成</string>
+    <string name="agent_interrupted">生成中断，已保留完成的步骤。</string>
+    <string name="agent_step_limit">已达到步数上限，任务已暂停。</string>
+    <string name="agent_truncated">工具调用因输出达到上限而中断。可以先调高输出上限，再继续。</string>
+    <string name="agent_unknown_result">上次操作可能已经生效，但结果未保存。请选择是否重新执行。</string>
+    <string name="agent_tool_skip">跳过，让 AI 检查</string>
+    <string name="agent_tool_rerun">重新执行</string>
+</resources>

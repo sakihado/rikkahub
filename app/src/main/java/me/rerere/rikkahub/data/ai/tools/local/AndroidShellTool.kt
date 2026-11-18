@@ -86,16 +86,16 @@ internal fun buildAndroidShellTool(
                 )
             }
 
-            // 仅在当前单次对话 (conversationId) 内缓存非破坏性且非 Root 的已批准命令
-            if (policy.decision == PolicyDecision.ASK && policy.canRememberInSession) {
-                approvalStore.recordApproval(command, asRoot, scopeKey)
-            }
-
             val result = executor.execute(
                 command = command,
                 asRoot = asRoot,
                 timeoutMs = timeoutSec * 1000L,
             )
+
+            // 仅在当前单次对话 (conversationId) 内缓存非破坏性且非 Root 的已批准命令
+            if (!result.timedOut && result.exitCode == 0 && policy.decision == PolicyDecision.ASK && policy.canRememberInSession) {
+                approvalStore.recordApproval(command, asRoot, scopeKey)
+            }
 
             val fullStdout = result.stdout
             val stderrText = result.stderr

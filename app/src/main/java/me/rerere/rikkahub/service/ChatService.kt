@@ -27,7 +27,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flowOn
+import me.rerere.ai.ui.AssistantStopReason
+import me.rerere.ai.ui.prepareForResume
+import me.rerere.ai.ui.canContinueFromBreakpoint
+import me.rerere.rikkahub.data.model.recoverInterruptedTurn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -97,6 +100,7 @@ import me.rerere.rikkahub.data.model.updateMessageById
 import me.rerere.rikkahub.data.model.withAssistantUpdate
 import me.rerere.rikkahub.data.model.withGoogleThoughtSignaturesIgnored
 import me.rerere.rikkahub.data.model.withNodeFavorite
+import me.rerere.rikkahub.data.model.withInterruptedTools
 import me.rerere.rikkahub.data.model.withToolApproval
 import me.rerere.rikkahub.data.model.withTranslation
 import me.rerere.rikkahub.data.model.withoutConversationFields
@@ -118,6 +122,7 @@ data class ChatError(
     val conversationId: Uuid? = null,
     val timestamp: Long = System.currentTimeMillis(),
     val solution: ChatErrorSolution? = null,
+    val resumeMessageId: Uuid? = null,
 )
 
 enum class ChatErrorSolution {
@@ -214,10 +219,11 @@ class ChatService(
         conversationId: Uuid? = null,
         title: String? = null,
         solution: ChatErrorSolution? = null,
+        resumeMessageId: Uuid? = null,
     ) {
         if (error is CancellationException) return
         _errors.update {
-            it + ChatError(title = title, error = error, conversationId = conversationId, solution = solution)
+            it + ChatError(title = title, error = error, conversationId = conversationId, solution = solution, resumeMessageId = resumeMessageId)
         }
     }
 
@@ -378,7 +384,9 @@ class ChatService(
         // settingsFlow 在启动初期还是占位值，固定配置必须基于真实设置
         val bound = conversation.bindConfig(settingsStore.awaitLoaded())
         if (bound !== conversation) conversationRepo.updateConversationConfig(bound)
-        return bound
+        val recovered = bound.recoverInterruptedTurn()
+        if (recovered !== bound) conversationRepo.updateConversation(recovered)
+        return recovered
     }
 
     /**
@@ -666,6 +674,35 @@ class ChatService(
         }
     }
 
+    fun continueFromBreakpoint(conversationId: Uuid, messageId: Uuid) {
+        val session = sessionManager.get(conversationId) ?: return
+        session.startBreakpointJob(messageId) { target ->
+            launchGenerationJob(conversationId) {
+                try {
+                    val updated = session.tryUpdate { conversation ->
+                        val node = conversation.messageNodes.lastOrNull() ?: return@tryUpdate null
+                        if (node.currentMessage != target) return@tryUpdate null
+                        val prepared = target.prepareForResume() ?: return@tryUpdate null
+                        conversation.upsertMessage(node.id, prepared)
+                    } ?: return@launchGenerationJob
+                    session.flush()
+                    _errors.update { errors -> errors.filterNot { it.conversationId == conversationId && it.resumeMessageId == messageId } }
+                    if (!updated.isAwaitingToolApproval) {
+                        runTurn(session, resumeMessageId = messageId)
+                        _generationDoneFlow.emit(conversationId)
+                    }
+                } catch (e: Exception) {
+                    // Preparation/persistence can fail before runTurn owns the message.
+                    session.update { conversation -> conversation.updateMessageById(messageId) { message ->
+                        if (message.stopReason == AssistantStopReason.RUNNING) message.copy(stopReason =
+                            if (e is CancellationException) AssistantStopReason.CANCELLED else AssistantStopReason.ERROR) else message
+                    } }
+                    reportFailure(session, e, R.string.error_title_generation)
+                }
+            }
+        }
+    }
+
     // ---- 处理工具调用审批 ----
 
     fun handleToolApproval(
@@ -726,10 +763,10 @@ class ChatService(
      * 开了自动压缩时，工具执行完发现上下文占用达到阈值就在这里压缩，之后的步骤写进检查点后面新的一条回复。
      * 失败时报告错误、暂停消息队列并返回 [TurnResult.Failed]；取消时直接抛出。
      */
-    private suspend fun runTurn(session: ConversationSession, regenerateNodeId: Uuid? = null): TurnResult {
+    private suspend fun runTurn(session: ConversationSession, regenerateNodeId: Uuid? = null, resumeMessageId: Uuid? = null): TurnResult {
         val conversationId = session.id
         // 先清理上一轮状态；确定历史后，仅为真正的续写恢复消息 ID。
-        session.replyMessageId.value = null
+        session.replyMessageId.value = resumeMessageId
         // 生成开始前失败时通知只用来取消 Live Update，用不到发送者名称
         var senderName = ""
         try {
@@ -741,7 +778,8 @@ class ChatService(
                     ?.let { nodeId -> latest.messageNodes.indexOfFirst { it.id == nodeId } }
                     ?.takeIf { it != -1 }
                     ?: latest.messageNodes.size
-                latest.copy(chatSuggestions = emptyList()).withoutUnresumableToolCalls(untilNode)
+                check(resumeMessageId == null || latest.messageNodes.lastOrNull()?.currentMessage?.id == resumeMessageId) { "Resume target changed" }
+                latest.copy(chatSuggestions = emptyList()).withoutUnresumableToolCalls(untilNode, resumeMessageId)
             }
 
             var target = replyTargetOf(conversation, regenerateNodeId)
@@ -802,28 +840,42 @@ class ChatService(
                         },
                     )
                     finishReason = null
-                    runAgent(request, hooks).flowOn(Dispatchers.IO).collect { event ->
-                        when (event) {
-                            is AgentEvent.MessageUpdated -> {
-                                // 生成过程中只有网络重试的提示会留着，收到新内容说明重试已经成功
-                                session.processingStatus.value = null
-                                session.update { it.upsertMessage(replyNodeId, event.message) }
-                                session.replyMessageId.value = event.message.id
-                                // 通知等边缘副作用由 ChatNotificationManager 消费；
-                                // tryEmit 不挂起，事件丢失只影响单次通知更新，不能反压生成链
-                                appEventBus.tryEmit(
-                                    AppEvent.ChatGenerationUpdate(conversationId, event.message, senderName)
-                                )
+                    // No buffered flowOn between a preview and a persistence barrier: by the time
+                    // onCheckpoint runs, collect has applied that exact MessageUpdated to this node.
+                    val durableHooks = object : me.rerere.ai.agent.AgentHooks by hooks {
+                        override suspend fun onCheckpoint(message: UIMessage) {
+                            val persisted = session.flush()
+                            check(persisted.getMessageNodeByMessageId(message.id)?.currentMessage?.parts == message.parts) {
+                                "Checkpoint target changed before it could be saved"
                             }
+                        }
+                    }
+                    withContext(Dispatchers.IO) {
+                        runAgent(request, durableHooks).collect { event ->
+                            when (event) {
+                                is AgentEvent.MessageUpdated -> {
+                                    // 生成过程中只有网络重试的提示会留着，收到新内容说明重试已经成功
+                                    session.processingStatus.value = null
+                                    session.update { it.upsertMessage(replyNodeId, event.message) }
+                                    session.replyMessageId.value = event.message.id
+                                    // 通知等边缘副作用由 ChatNotificationManager 消费；
+                                    // tryEmit 不挂起，事件丢失只影响单次通知更新，不能反压生成链
+                                    appEventBus.tryEmit(
+                                        AppEvent.ChatGenerationUpdate(conversationId, event.message, senderName)
+                                    )
+                                }
 
-                            is AgentEvent.Retrying -> {
-                                logRetry(event.attempt)
-                                session.processingStatus.value = retryStatus(event.attempt)
-                            }
+                                is AgentEvent.Retrying -> {
+                                    logRetry(event.attempt)
+                                    session.processingStatus.value = retryStatus(event.attempt)
+                                }
 
-                            is AgentEvent.Finished -> {
-                                Log.i(TAG, "runTurn: finished (${event.reason})")
-                                finishReason = event.reason
+                                is AgentEvent.Finished -> {
+                                    Log.i(TAG, "runTurn: finished (${event.reason})")
+                                    finishReason = event.reason
+                                    session.update { it.upsertMessage(replyNodeId, event.message) }
+                                    session.replyMessageId.value = event.message.id
+                                }
                             }
                         }
                     }
@@ -847,6 +899,9 @@ class ChatService(
                     target = replyTargetOf(session.state.value, regenerateNodeId = null)
                     session.replyMessageId.value = target.continuedMessageId
                 }
+            } catch (e: Exception) {
+                session.markInterrupted(if (e is CancellationException) AssistantStopReason.CANCELLED else AssistantStopReason.ERROR)
+                throw e
             } finally {
                 withContext(NonCancellable) {
                     session.processingStatus.value = null
@@ -866,16 +921,19 @@ class ChatService(
 
             val reason = checkNotNull(finishReason)
             // 等待审批时这一轮还没结束，标题、建议和记忆整理等审批之后再做
-            if (reason !is AgentFinishReason.AwaitingApproval) {
+            if (reason == AgentFinishReason.StepLimitReached || reason == AgentFinishReason.Truncated) session.inbox.pause()
+            if (reason == AgentFinishReason.Completed) {
                 sessionManager.launchWithSession(conversationId) { generateTitle(conversationId) }
                 sessionManager.launchWithSession(conversationId) { generateSuggestion(conversationId) }
                 if (turn.assistant.enableMemory) memoryConsolidationScheduler.onTurnFinished(session.state.value)
             }
             return TurnResult.Finished(reason)
         } catch (e: CancellationException) {
+            withContext(NonCancellable) { session.persistInterruption(AssistantStopReason.CANCELLED) }
             appEventBus.tryEmit(AppEvent.ChatGenerationEnded(conversationId, senderName, null))
             throw e
         } catch (e: InvalidMcpServerNamesException) {
+            session.persistInterruption(AssistantStopReason.ERROR)
             session.inbox.pause()
             addError(
                 error = IllegalStateException(
@@ -889,11 +947,29 @@ class ChatService(
             appEventBus.tryEmit(AppEvent.ChatGenerationEnded(conversationId, senderName, null))
             session.inbox.pause()
             e.printStackTrace()
-            addError(e, conversationId, title = context.getString(R.string.error_title_generation))
+            session.persistInterruption(AssistantStopReason.ERROR)
+            val target = session.state.value.messageNodes.lastOrNull()?.currentMessage
+            addError(e, conversationId, title = context.getString(R.string.error_title_generation),
+                resumeMessageId = target?.takeIf { it.id == session.replyMessageId.value && it.canContinueFromBreakpoint() }?.id)
             Logging.log(TAG, "runTurn: $e")
             Logging.log(TAG, e.stackTraceToString())
             return TurnResult.Failed
         }
+    }
+
+    // Setup may fail before the agent collector (and its finally) is entered.
+    private suspend fun ConversationSession.persistInterruption(reason: AssistantStopReason) {
+        val id = replyMessageId.value ?: return
+        if (state.value.getMessageNodeByMessageId(id)?.messages?.find { it.id == id }?.stopReason == reason) return
+        markInterrupted(reason)
+        flush()
+    }
+
+    private fun ConversationSession.markInterrupted(reason: AssistantStopReason) {
+        val id = replyMessageId.value ?: return
+        update { conversation -> conversation.updateMessageById(id) { message ->
+            (if (reason == AssistantStopReason.CANCELLED) message.withInterruptedTools() else message).copy(stopReason = reason)
+        } }
     }
 
     // 模型不支持工具调用时，搜索和 MCP 工具都不会生效，提醒一下
@@ -1825,6 +1901,7 @@ class ChatService(
         }
         if (jobs.isEmpty()) return
         jobs.forEach { it.join() }
-        if (session.isInitialized) finishInterruptedPendingTools(session)
+        // runTurn marks its own reply and flushes before releasing the job. Never mutate
+        // the current tail here: a new turn could have started while joining the old job(s).
     }
 }

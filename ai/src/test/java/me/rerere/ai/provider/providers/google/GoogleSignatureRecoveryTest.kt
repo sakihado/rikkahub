@@ -27,6 +27,8 @@ import me.rerere.ai.ui.GoogleThoughtMetadata
 import me.rerere.ai.ui.ServerToolMetadata
 import me.rerere.ai.ui.ServerToolProtocol
 import me.rerere.ai.ui.ServerToolStatus
+import me.rerere.ai.ui.AssistantStopReason
+import me.rerere.ai.ui.prepareForResume
 import me.rerere.ai.ui.StreamChunkHandler
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -85,6 +87,37 @@ class GoogleSignatureRecoveryTest {
         }
         decoder.onClosed().forEach { messages = handler.handle(messages, it) }
         return messages.last()
+    }
+
+    @Test
+    fun `EOF after a function call is not a protocol completion without finish reason`() {
+        fun decodeFinish(ending: String): Boolean {
+            val decoder = GoogleStreamDecoder("id", model.modelId, origin)
+            decoder.accept(SseEvent(data = """{"candidates":[{"content":{"parts":[{"functionCall":{"name":"noop","args":{}}}]}$ending}]}"""))
+            return decoder.onClosed().filterIsInstance<me.rerere.ai.ui.StreamChunk.Finish>().single().protocolCompleted
+        }
+        assertFalse(decodeFinish(""))
+        assertTrue(decodeFinish(""","finishReason":"STOP""""))
+    }
+
+    @Test
+    fun `resumed parallel and sequential calls preserve signed part placement on wire`() {
+        fun call(id: String, step: Int, tail: Int = 0) = UIMessagePart.Tool(id, id, "{}",
+            output = listOf(UIMessagePart.Text("ok")), metadata = metadata("sig-$id"),
+            stepIndex = step, followingPartCount = tail)
+        val signedTail = UIMessagePart.Text("", metadata("tail", signatureOnly = true))
+        val message = UIMessage.assistant("").copy(parts = listOf(call("a", 1), call("b", 1, 1),
+            signedTail, call("c", 2), UIMessagePart.Text("draft")), committedPartCount = 4,
+            stopReason = AssistantStopReason.ERROR)
+        val saved = json.decodeFromString<UIMessage>(json.encodeToString(message))
+        val contents = build(listOf(UIMessage.user("question"), checkNotNull(saved.prepareForResume())))["contents"]!!.jsonArray
+        assertEquals(listOf("user", "model", "user", "model", "user"), contents.map { it.jsonObject["role"]!!.jsonPrimitive.content })
+        val first = contents[1].jsonObject["parts"]!!.jsonArray
+        assertEquals(3, first.size)
+        assertEquals(setOf("thoughtSignature"), first[2].jsonObject.keys)
+        assertEquals("tail", first[2].jsonObject["thoughtSignature"]!!.jsonPrimitive.content)
+        assertEquals(2, contents[2].jsonObject["parts"]!!.jsonArray.size)
+        assertEquals("sig-c", contents[3].jsonObject["parts"]!!.jsonArray.single().jsonObject["thoughtSignature"]!!.jsonPrimitive.content)
     }
 
     @Test

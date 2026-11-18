@@ -21,6 +21,8 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.TextGenerationResult
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.AssistantStopReason
+import me.rerere.ai.ui.prepareForResume
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
@@ -65,6 +67,58 @@ class AgentLoopTest {
                 if (index >= newPartsFrom && part is UIMessagePart.Text) part.copy(text = part.text + "!") else part
             }
         )
+    }
+
+    @Test
+    fun `transport EOF and length limit never dispatch a partial batch`() = runTest {
+        var calls = 0
+        val write = tool("write") { calls++; ok() }
+        provider.stream { toolCall("a", "write"); emit(StreamChunk.Finish(protocolCompleted = false)) }
+        assertTrue(runCatching { runToEnd(request(tools = listOf(write))) }.exceptionOrNull() is IOException)
+        provider.stream { toolCall("b", "write"); emit(StreamChunk.Finish("max_tokens")) }
+        assertEquals(AgentFinishReason.Truncated, runToEnd(request(tools = listOf(write))).finished().reason)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun `failed persistence barrier prevents dispatch and orphaned attempt needs a fresh decision`() = runTest {
+        var calls = 0
+        val write = tool("write") { calls++; ok() }
+        provider.stream { toolCall("a", "write"); finish() }
+        var atBarrier: UIMessage? = null
+        val storage = object : AgentHooks by hooks {
+            override suspend fun onCheckpoint(message: UIMessage) {
+                if (message.tool("a").outcomeUnknown) {
+                    atBarrier = message
+                    throw IOException("storage offline")
+                }
+            }
+        }
+        val failure = runCatching { runToEnd(request(tools = listOf(write)), storage) }.exceptionOrNull()
+        assertEquals("storage offline", failure?.message)
+        val saved = checkNotNull(atBarrier)
+        val restarted = runToEnd(request(messages = listOf(saved), tools = listOf(write))).finished()
+        assertEquals(AgentFinishReason.AwaitingApproval(setOf("a")), restarted.reason)
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun `resume keeps completed output and rolls back uncommitted text only`() = runTest {
+        var calls = 0
+        val read = tool("read") { calls++; ok() }
+        provider.stream { toolCall("a", "read"); finish() }
+        provider.stream { text("draft"); throw IOException("offline") }
+        val events = mutableListOf<AgentEvent>()
+        assertTrue(runCatching { runAgent(request(tools = listOf(read)), hooks).toList(events) }.isFailure)
+        val interrupted = (events.last() as AgentEvent.MessageUpdated).message.copy(stopReason = AssistantStopReason.ERROR)
+        val safe = checkNotNull(interrupted.prepareForResume())
+        assertEquals(listOf(interrupted.tool("a")), safe.parts)
+        provider.stream { text("answer"); finish() }
+        val done = runToEnd(request(messages = listOf(safe), tools = listOf(read))).finished().message
+        assertEquals(safe.id, done.id)
+        assertEquals(1, calls)
+        assertEquals(listOf("answer"), done.texts())
+        assertNull(done.prepareForResume())
     }
 
     @Test
@@ -282,7 +336,7 @@ class AgentLoopTest {
     }
 
     @Test
-    fun `invalid arguments and unknown tools are reported instead of executed`() = runTest {
+    fun `malformed arguments reject the entire batch before dispatch`() = runTest {
         var executed = false
         val tools = listOf(tool("search") {
             executed = true
@@ -298,10 +352,8 @@ class AgentLoopTest {
             finish()
         }
 
-        val message = runToEnd(request(tools = tools)).finished().message
-
-        assertTrue(message.tool("call-1").outputText().contains("Invalid tool arguments JSON for search"))
-        assertTrue(message.tool("call-2").outputText().contains("Tool missing not found"))
+        val error = runCatching { runToEnd(request(tools = tools)) }.exceptionOrNull()
+        assertTrue(error?.message.orEmpty().contains("Invalid tool arguments JSON for search"))
         assertFalse(executed)
     }
 

@@ -35,7 +35,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
         return DecodeResult(chunks, completed)
     }
 
-    override fun onClosed(): List<StreamChunk> = state.finish()
+    override fun onClosed(): List<StreamChunk> = state.finish(protocolCompleted = false)
 
     private fun parseEvent(payload: JsonObject): List<StreamChunk> {
         val chunkType = payload["type"]?.jsonPrimitive?.content ?: error("chunk type not found")
@@ -393,6 +393,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
         }
 
         fun finish(
+            protocolCompleted: Boolean = true,
             finishReason: String? = null,
             responseId: String? = null,
             model: String? = null,
@@ -408,7 +409,7 @@ internal class ResponseApiStreamDecoder : StreamChunkDecoder {
                 openImageIds.toList().forEach { addAll(endImage(it)) }
                 openToolIds.toList().forEach { addAll(endTool(it)) }
                 openServerToolIds.clear()
-                add(StreamChunk.Finish(finishReason, responseId, model))
+                add(StreamChunk.Finish(finishReason, responseId, model, protocolCompleted))
             }
         }
     }

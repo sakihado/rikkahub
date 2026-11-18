@@ -160,7 +160,7 @@ internal fun streamClaudeWithPauseTurn(
 
                 is StreamChunk.Finish -> {
                     finish = chunk
-                    if (chunk.finishReason != CLAUDE_PAUSE_TURN ||
+                    if (!chunk.protocolCompleted || chunk.finishReason != CLAUDE_PAUSE_TURN ||
                         continuationCount == maxContinuations
                     ) {
                         emit(chunk)
@@ -171,7 +171,7 @@ internal fun streamClaudeWithPauseTurn(
             }
         }
 
-        if (finish?.finishReason != CLAUDE_PAUSE_TURN || continuationCount == maxContinuations) {
+        if (finish?.protocolCompleted != true || finish?.finishReason != CLAUDE_PAUSE_TURN || continuationCount == maxContinuations) {
             return@flow
         }
 

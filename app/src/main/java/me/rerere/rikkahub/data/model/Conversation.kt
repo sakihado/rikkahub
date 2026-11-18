@@ -213,9 +213,11 @@ internal val Conversation.pendingToolCalls: List<UIMessagePart.Tool>
  * 去掉还有未执行、又没法继续执行的工具调用的消息（比如还在等待审批），这样的消息发给模型会被拒绝。
  * 已经批准、拒绝或回答过的工具调用之后会继续执行，保留。只处理下标小于 [untilNode] 的节点。
  */
-internal fun Conversation.withoutUnresumableToolCalls(untilNode: Int = messageNodes.size): Conversation {
+internal fun Conversation.withoutUnresumableToolCalls(untilNode: Int = messageNodes.size, resumeMessageId: Uuid? = null): Conversation {
     val nodes = messageNodes.mapIndexedNotNull { index, node ->
-        if (index >= untilNode) return@mapIndexedNotNull node
+        if (index >= untilNode || (index == messageNodes.lastIndex && node.currentMessage.id == resumeMessageId)) {
+            return@mapIndexedNotNull node
+        }
         val unexecuted = node.currentMessage.getTools().filter { !it.isExecuted }
         if (unexecuted.isEmpty() || unexecuted.any { it.canResumeExecution }) return@mapIndexedNotNull node
         val messages = node.messages.filter { it.id != node.currentMessage.id }

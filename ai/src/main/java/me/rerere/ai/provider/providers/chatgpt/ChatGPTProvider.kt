@@ -122,6 +122,7 @@ class ChatGPTProvider(
             result = handler.handle(result, chunk)
         }
         val message = result.last()
+        if (finish?.protocolCompleted != true) throw java.io.EOFException("Incomplete model response")
         return TextGenerationResult(
             id = finish?.responseId.orEmpty(),
             model = finish?.model ?: params.model.modelId,

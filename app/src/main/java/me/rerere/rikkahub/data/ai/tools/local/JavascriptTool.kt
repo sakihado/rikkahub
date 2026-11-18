@@ -21,6 +21,7 @@ import kotlin.time.Duration.Companion.milliseconds
 
 internal fun buildJavascriptTool(): Tool = Tool(
     name = "eval_javascript",
+    isReadOnly = true,
     description = """
         Execute JavaScript code using QuickJS engine (ES2020).
         The result is the value of the last expression in the code.

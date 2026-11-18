@@ -9,6 +9,8 @@ import kotlinx.serialization.json.put
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.sum
 import me.rerere.ai.provider.TextGenerationParams
+import me.rerere.ai.ui.AssistantStopReason
+import me.rerere.ai.ui.StreamChunk
 import me.rerere.ai.ui.StreamChunkHandler
 import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
@@ -22,6 +24,8 @@ import kotlin.time.TimeSource
 
 // 输出为空的工具会被当成没执行过，之后每一步都会再执行一次，所以换成占位文本
 private const val EMPTY_TOOL_OUTPUT = "(no output)"
+
+private class TruncatedToolStep(val preview: UIMessage) : RuntimeException()
 
 private class StreamChunkHandlingException(override val cause: Throwable) : RuntimeException(cause)
 
@@ -38,6 +42,9 @@ internal class AgentLoop(
     init {
         val last = request.messages.lastOrNull()
         if (last?.role == MessageRole.ASSISTANT) {
+            require(last.committedPartCount == null || last.committedPartCount == last.parts.size) {
+                "Discard the uncommitted preview before continuing this reply"
+            }
             history = request.messages.dropLast(1)
             message = last
         } else {
@@ -62,7 +69,12 @@ internal class AgentLoop(
             if (steps == request.maxSteps) return finish(AgentFinishReason.StepLimitReached)
             // 只在刚执行完工具时问：接着一条已经执行完的消息继续时不问，否则暂停之后再运行又会立刻暂停
             if (toolsExecuted && hooks.shouldPause(checkNotNull(message))) return finish(AgentFinishReason.Paused)
-            generateStep()
+            try {
+                generateStep()
+            } catch (e: TruncatedToolStep) {
+                message = e.preview
+                return finish(AgentFinishReason.Truncated)
+            }
             steps++
         }
     }
@@ -72,8 +84,8 @@ internal class AgentLoop(
         val updated = current.copy(
             parts = current.parts.map { part ->
                 if (part is UIMessagePart.Tool && !part.isExecuted &&
-                    part.approvalState == ToolApprovalState.Auto &&
-                    findTool(part.toolName)?.needsApproval?.invoke(part.inputAsJson()) == true
+                    (part.outcomeUnknown || (part.approvalState == ToolApprovalState.Auto &&
+                        findTool(part.toolName)?.needsApproval?.invoke(part.inputAsJson()) == true))
                 ) {
                     part.copy(approvalState = ToolApprovalState.Pending)
                 } else {
@@ -95,13 +107,26 @@ internal class AgentLoop(
             role = MessageRole.ASSISTANT,
             parts = emptyList(),
             modelId = params.model.id,
+            committedPartCount = 0,
         )
         val generated = if (request.stream) {
             stream(step.messages, params, base)
         } else {
             generate(step.messages, params, base)
         }
-        update(hooks.finishStep(generated, newPartsFrom = base.parts.size).copy(finishedAt = now()))
+        val finished = hooks.finishStep(generated, newPartsFrom = base.parts.size)
+        val parts = finished.parts.mapIndexed { index, part ->
+            if (index < base.parts.size || part !is UIMessagePart.Tool) part else {
+                require(part.toolName.isNotBlank() && runCatching {
+                    json.parseToJsonElement(part.input.ifBlank { "{}" }) is kotlinx.serialization.json.JsonObject
+                }.getOrDefault(false)) { "Invalid tool arguments JSON for ${part.toolName}" }
+                part.copy(stepIndex = generated.stepCount, followingPartCount = finished.parts
+                    .asSequence().drop(index + 1).takeWhile { it !is UIMessagePart.Tool }.count())
+            }
+        }
+        checkpoint(finished.copy(parts = parts, committedPartCount = parts.size, finishedAt = now(),
+            stopReason = if (parts.drop(base.parts.size).any { it is UIMessagePart.Tool && !it.isExecuted })
+                AssistantStopReason.RUNNING else AssistantStopReason.COMPLETED))
     }
 
     // 续写普通回复时最后一个 part 不是执行完的工具或通知，这时追加会把续写变成新的一轮
@@ -111,7 +136,8 @@ internal class AgentLoop(
         val parts = hooks.pendingParts()
         if (parts.isEmpty()) return
         val base = current ?: UIMessage(role = MessageRole.ASSISTANT, parts = emptyList())
-        update(base.copy(parts = base.parts + parts))
+        checkpoint(base.copy(parts = base.parts + parts, committedPartCount = base.parts.size + parts.size,
+            stopReason = AssistantStopReason.RUNNING))
     }
 
     private suspend fun stream(
@@ -121,19 +147,22 @@ internal class AgentLoop(
     ): UIMessage {
         // 多轮工具调用共用同一条助手消息，消息上已有的 usage 和耗时来自之前的步骤。
         // 本步从清空的统计开始（merge 只适合同一次请求内的快照），再与之前的步骤累加。
-        val stepStart = base.copy(usage = null, generationTimeMs = null)
+        val stepStart = base.copy(usage = null, generationTimeMs = null, parts = emptyList(), stopReason = AssistantStopReason.RUNNING)
         return try {
             withRetry(request.retry, onRetry = { events.emit(AgentEvent.Retrying(it)) }) {
                 // 每次重试都从本步开始时的消息重新合并，不会把重试的响应接在已经展示的半截回复后面；
                 // 各次尝试共用同一个消息 id，调用方直接覆盖即可。
                 val handler = StreamChunkHandler(params.model)
                 var attempt = stepStart
+                var finish: StreamChunk.Finish? = null
+                fun combined() = attempt.copy(parts = base.parts + attempt.parts)
                 var firstChunk: TimeMark? = null
                 request.provider.streamText(request.providerSetting, messages, params).collect { chunk ->
                     try {
                         val mark = firstChunk ?: TimeSource.Monotonic.markNow().also { firstChunk = it }
+                        if (chunk is StreamChunk.Finish) finish = chunk
                         attempt = handler.handle(listOf(attempt), chunk).single()
-                        preview(attempt.withStepStats(base, mark.elapsedNow()), newPartsFrom = base.parts.size)
+                        preview(combined().withStepStats(base, mark.elapsedNow()).copy(stepCount = base.stepCount), newPartsFrom = base.parts.size)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
@@ -141,7 +170,10 @@ internal class AgentLoop(
                         throw StreamChunkHandlingException(e)
                     }
                 }
-                attempt.withStepStats(base, firstChunk?.elapsedNow() ?: Duration.ZERO)
+                if (finish?.protocolCompleted != true) throw java.io.EOFException("Incomplete model response")
+                val result = combined().withStepStats(base, firstChunk?.elapsedNow() ?: Duration.ZERO)
+                checkToolTermination(result, base, finish?.finishReason)
+                result
             }
         } catch (e: StreamChunkHandlingException) {
             throw e.cause
@@ -169,7 +201,15 @@ internal class AgentLoop(
             usage = result.usage,
         ).finishReasoning().withStepStats(base, requestTime)
         preview(generated, newPartsFrom = base.parts.size)
+        checkToolTermination(generated, base, result.finishReason)
         return generated
+    }
+
+    private fun checkToolTermination(result: UIMessage, base: UIMessage, reason: String?) {
+        if (result.parts.drop(base.parts.size).none { it is UIMessagePart.Tool && !it.isExecuted }) return
+        val stop = reason?.lowercase()
+        if (stop in setOf("length", "max_tokens", "max_output_tokens", "model_context_window_exceeded") ||
+            stop?.startsWith("incomplete") == true) throw TruncatedToolStep(result.copy(stepCount = base.stepCount))
     }
 
     // 按调用顺序逐个执行，每执行完一个就更新一次，中途取消时已经执行的结果不会丢
@@ -178,23 +218,30 @@ internal class AgentLoop(
         for (tool in tools) {
             // 只给真正运行的工具计时；开始时先写一次，界面才能在执行中实时显示耗时
             val runs = tool.approvalState == ToolApprovalState.Auto || tool.approvalState == ToolApprovalState.Approved
-            if (runs) updateTool(tool.toolCallId) { it.copy(startedAt = Clock.System.now(), finishedAt = null) }
+            if (runs) {
+                check(!tool.outcomeUnknown) { "Interrupted tool requires a new decision" }
+                val sideEffect = findTool(tool.toolName)?.isReadOnly != true
+                updateTool(tool, persist = sideEffect) {
+                    it.copy(startedAt = Clock.System.now(), finishedAt = null, outcomeUnknown = sideEffect)
+                }
+            }
             val output = execute(tool)
-            updateTool(tool.toolCallId) {
-                it.copy(output = output, finishedAt = if (runs) Clock.System.now() else it.finishedAt)
+            updateTool(tool, persist = true) {
+                it.copy(outcomeUnknown = false, output = output, finishedAt = if (runs) Clock.System.now() else it.finishedAt)
             }
         }
     }
 
-    private suspend fun updateTool(toolCallId: String, transform: (UIMessagePart.Tool) -> UIMessagePart.Tool) {
+    private suspend fun updateTool(tool: UIMessagePart.Tool, persist: Boolean, transform: (UIMessagePart.Tool) -> UIMessagePart.Tool) {
         val current = checkNotNull(message)
-        update(
-            current.copy(
-                parts = current.parts.map { part ->
-                    if (part is UIMessagePart.Tool && part.toolCallId == toolCallId) transform(part) else part
-                }
-            )
+        val updated = current.copy(
+            parts = current.parts.map { part ->
+                if (part is UIMessagePart.Tool && part.stepIndex == tool.stepIndex && part.toolCallId == tool.toolCallId) {
+                    transform(part)
+                } else part
+            }
         )
+        if (persist) checkpoint(updated) else update(updated)
     }
 
     private suspend fun execute(tool: UIMessagePart.Tool): List<UIMessagePart> =
@@ -222,6 +269,11 @@ internal class AgentLoop(
 
     private fun findTool(name: String) = request.tools.find { it.name == name }
 
+    private suspend fun checkpoint(updated: UIMessage) {
+        update(updated)
+        hooks.onCheckpoint(updated)
+    }
+
     private suspend fun update(updated: UIMessage) {
         message = updated
         events.emit(AgentEvent.MessageUpdated(updated))
@@ -233,7 +285,14 @@ internal class AgentLoop(
     }
 
     private suspend fun finish(reason: AgentFinishReason) {
-        events.emit(AgentEvent.Finished(checkNotNull(message), reason))
+        val stop = when (reason) {
+            AgentFinishReason.Completed -> AssistantStopReason.COMPLETED
+            AgentFinishReason.StepLimitReached -> AssistantStopReason.STEP_LIMIT
+            AgentFinishReason.Truncated -> AssistantStopReason.TRUNCATED
+            is AgentFinishReason.AwaitingApproval -> AssistantStopReason.AWAITING_APPROVAL
+            AgentFinishReason.Paused -> AssistantStopReason.RUNNING
+        }
+        events.emit(AgentEvent.Finished(checkNotNull(message).copy(stopReason = stop), reason))
     }
 }
 

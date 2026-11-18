@@ -43,9 +43,7 @@ import me.rerere.ai.provider.ProviderQuota
 import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.provider.TextGenerationResult
-import me.rerere.ai.provider.providers.PartGroup
 import me.rerere.ai.provider.providers.google.vertex.ServiceAccountTokenProvider
-import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.provider.runQuotaQuery
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.registry.ModelRegistry
@@ -833,46 +831,37 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         message: UIMessage,
         replayContext: ThoughtReplayContext,
     ) {
-        val groups = groupPartsByToolBoundary(message.parts)
-        val partsBuffer = mutableListOf<JsonObject>()
+        val modelParts = mutableListOf<JsonObject>()
+        val calls = mutableListOf<UIMessagePart.Tool>()
+        var followingParts = 0
 
-        for (group in groups) {
-            when (group) {
-                is PartGroup.Content -> {
-                    group.parts.flatMap { it.toGoogleParts(replayContext) }.forEach { partsBuffer.add(it) }
-                }
+        fun flushStep() {
+            if (modelParts.isNotEmpty()) add(buildJsonObject {
+                put("role", "model")
+                put("parts", JsonArray(modelParts.toList()))
+            })
+            if (calls.isNotEmpty()) add(buildJsonObject {
+                put("role", "user")
+                putJsonArray("parts") { calls.forEach { add(it.toFunctionResponsePart(replayContext)) } }
+            })
+            modelParts.clear()
+            calls.clear()
+            followingParts = 0
+        }
 
-                is PartGroup.Tools -> {
-                    // 添加 functionCall 到 parts 缓冲
-                    group.tools.forEachIndexed { index, tool ->
-                        partsBuffer.add(tool.toFunctionCallPart(replayContext, isFirstInBatch = index == 0))
-                    }
-
-                    // 输出 model 消息
-                    add(buildJsonObject {
-                        put("role", "model")
-                        putJsonArray("parts") { partsBuffer.forEach { add(it) } }
-                    })
-                    partsBuffer.clear()
-
-                    // 紧跟 functionResponse
-                    add(buildJsonObject {
-                        put("role", "user")
-                        putJsonArray("parts") {
-                            group.tools.forEach { add(it.toFunctionResponsePart(replayContext)) }
-                        }
-                    })
-                }
+        for (part in message.parts) {
+            if (part is UIMessagePart.Tool && part.isExecuted) {
+                if (calls.isNotEmpty() && part.stepIndex != calls.last().stepIndex) flushStep()
+                modelParts += part.toFunctionCallPart(replayContext, isFirstInBatch = calls.isEmpty())
+                calls += part
+                followingParts = part.followingPartCount
+            } else {
+                if (calls.isNotEmpty() && followingParts == 0) flushStep()
+                modelParts += part.toGoogleParts(replayContext)
+                if (followingParts > 0) followingParts--
             }
         }
-
-        // 输出剩余内容
-        if (partsBuffer.isNotEmpty()) {
-            add(buildJsonObject {
-                put("role", "model")
-                putJsonArray("parts") { partsBuffer.forEach { add(it) } }
-            })
-        }
+        flushStep()
     }
 
     private fun JsonArrayBuilder.addUserMessage(

@@ -11,6 +11,7 @@ import java.util.Locale
 
 internal fun buildTimeInfoTool(): Tool = Tool(
     name = "get_time_info",
+    isReadOnly = true,
     description = """
         Get the current local date and time info from the device.
         Returns year/month/day, weekday, ISO date/time strings, timezone, and timestamp.

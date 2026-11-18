@@ -116,6 +116,7 @@ fun ChatMessage(
     lastMessage: Boolean = false,
     onFork: () -> Unit,
     onRegenerate: () -> Unit,
+    onContinue: (() -> Unit)? = null,
     onEdit: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
@@ -234,9 +235,13 @@ fun ChatMessage(
             Column(
                 modifier = Modifier.animateContentSize()
             ) {
+                if (onContinue != null && message.stopReason != me.rerere.ai.ui.AssistantStopReason.CANCELLED) {
+                    BreakpointCard(message.stopReason, onContinue)
+                }
                 ChatMessageActionButtons(
                     message = message,
                     onRegenerate = onRegenerate,
+                    onContinue = onContinue,
                     node = node,
                     onUpdate = onUpdate,
                     onOpenActionSheet = {

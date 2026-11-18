@@ -13,6 +13,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import me.rerere.ai.ui.UIMessage
+import me.rerere.ai.ui.canContinueFromBreakpoint
 import me.rerere.ai.ui.finishReasoning
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.isAwaitingToolApproval
@@ -288,6 +290,16 @@ class ConversationSession(
             }
         }
         job?.start()
+    }
+
+    /** Acquire the same slot as normal generation, but never replace an existing job. */
+    @Synchronized
+    internal fun startBreakpointJob(messageId: Uuid, createLazyJob: (UIMessage) -> Job): Boolean {
+        if (!isInitialized || getJob() != null) return false
+        val target = state.value.messageNodes.lastOrNull()?.currentMessage ?: return false
+        if (target.id != messageId || !target.canContinueFromBreakpoint()) return false
+        setJob(createLazyJob(target), cancelPrevious = false)
+        return true
     }
 
     fun getJob(): Job? = _generationJob.value
