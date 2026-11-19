@@ -233,7 +233,8 @@ fun ChatMessage(
                 fadeOut(motionScheme.fastEffectsSpec())
         ) {
             Column(
-                modifier = Modifier.animateContentSize()
+                modifier = Modifier.animateContentSize(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 if (onContinue != null && message.stopReason != me.rerere.ai.ui.AssistantStopReason.CANCELLED) {
                     BreakpointCard(message.stopReason, onContinue)

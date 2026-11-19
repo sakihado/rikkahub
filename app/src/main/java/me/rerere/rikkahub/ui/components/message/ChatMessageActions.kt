@@ -49,6 +49,7 @@ import me.rerere.hugeicons.stroke.Edit01
 import me.rerere.hugeicons.stroke.FavouriteCircle
 import me.rerere.hugeicons.stroke.GitFork
 import me.rerere.hugeicons.stroke.MoreVertical
+import me.rerere.hugeicons.stroke.Play
 import me.rerere.hugeicons.stroke.Refresh03
 import me.rerere.hugeicons.stroke.Share04
 import me.rerere.hugeicons.stroke.StopCircle
@@ -102,12 +103,11 @@ fun ColumnScope.ChatMessageActionButtons(
             onClick = { context.copyMessageToClipboard(message) },
         )
 
-        if (onContinue != null && message.stopReason == me.rerere.ai.ui.AssistantStopReason.CANCELLED) {
-            androidx.compose.material3.TextButton(onClick = onContinue) { Text(stringResource(R.string.agent_continue_short)) }
-        }
+        val hasBreakpointRetry = message.role != MessageRole.USER && onContinue != null
         ChatMessageActionButton(
             icon = HugeIcons.Refresh03,
             contentDescription = stringResource(R.string.regenerate),
+            highlighted = hasBreakpointRetry,
             onClick = {
                 if (message.role == MessageRole.USER) {
                     showRegenerateConfirm = true
@@ -209,17 +209,17 @@ fun ColumnScope.ChatMessageActionButtons(
     }
 
     if (chooseRetry && onContinue != null) {
-        ModalBottomSheet(onDismissRequest = { chooseRetry = false }) {
-            listOf(R.string.agent_continue, R.string.agent_regenerate_all).forEachIndexed { index, title ->
-                SegmentedListItem(
-                    onClick = {
-                        chooseRetry = false
-                        if (index == 0) onContinue() else onRegenerate()
-                    },
-                    shapes = ListItemDefaults.segmentedShapes(index = index, count = 2),
-                ) { Text(stringResource(title)) }
-            }
-        }
+        RetryChoiceSheet(
+            onContinue = {
+                chooseRetry = false
+                onContinue()
+            },
+            onRegenerate = {
+                chooseRetry = false
+                onRegenerate()
+            },
+            onDismissRequest = { chooseRetry = false },
+        )
     }
     // Regenerate confirmation dialog
     RikkaConfirmDialog(
@@ -238,7 +238,7 @@ fun ColumnScope.ChatMessageActionButtons(
 
 private val ActionIconSize = 18.dp
 
-// 消息下方的小号图标按钮，按下时圆形收成方角
+// 消息下方的小号图标按钮，按下时圆形收成方角；高亮态用于提示点击会弹出断点续跑选项
 @Composable
 internal fun ChatMessageActionButton(
     icon: ImageVector,
@@ -246,6 +246,7 @@ internal fun ChatMessageActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    highlighted: Boolean = false,
 ) {
     // 按钮排得密，不让 48dp 的最小触控尺寸把间距撑开
     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
@@ -254,15 +255,77 @@ internal fun ChatMessageActionButton(
             shapes = IconButtonDefaults.shapes(),
             modifier = modifier.size(IconButtonDefaults.extraSmallContainerSize()),
             enabled = enabled,
-            colors = IconButtonDefaults.iconButtonColors(
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            ),
+            colors = if (highlighted) {
+                IconButtonDefaults.iconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            } else {
+                IconButtonDefaults.iconButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 modifier = Modifier.size(ActionIconSize),
             )
+        }
+    }
+}
+
+@Composable
+private fun RetryChoiceSheet(
+    onContinue: () -> Unit,
+    onRegenerate: () -> Unit,
+    onDismissRequest: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        sheetState = rememberBottomSheetState(
+            initialValue = SheetValue.Hidden,
+            enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
+        ) {
+            SegmentedListItem(
+                onClick = onContinue,
+                shapes = ListItemDefaults.segmentedShapes(index = 0, count = 2),
+                colors = ListItemDefaults.segmentedColors(),
+                leadingContent = {
+                    Icon(
+                        imageVector = HugeIcons.Play,
+                        contentDescription = null,
+                    )
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.agent_continue_desc))
+                },
+            ) {
+                Text(stringResource(R.string.agent_continue))
+            }
+            SegmentedListItem(
+                onClick = onRegenerate,
+                shapes = ListItemDefaults.segmentedShapes(index = 1, count = 2),
+                colors = ListItemDefaults.segmentedColors(),
+                leadingContent = {
+                    Icon(
+                        imageVector = HugeIcons.Refresh03,
+                        contentDescription = null,
+                    )
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.agent_regenerate_all_desc))
+                },
+            ) {
+                Text(stringResource(R.string.agent_regenerate_all))
+            }
         }
     }
 }

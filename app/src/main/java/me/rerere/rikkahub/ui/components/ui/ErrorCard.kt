@@ -40,6 +40,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.Copy01
 import me.rerere.hugeicons.stroke.Delete01
+import me.rerere.hugeicons.stroke.Play
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.service.ChatError
@@ -157,7 +158,29 @@ fun ErrorCard(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (onContinue != null) {
-                    androidx.compose.material3.TextButton(onClick = onContinue) { Text(stringResource(R.string.agent_continue)) }
+                    Surface(
+                        onClick = onContinue,
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.12f),
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(top = 2.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = HugeIcons.Play,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                            )
+                            Text(
+                                text = stringResource(R.string.agent_continue),
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
                 }
                 if (error.solution == ChatErrorSolution.CheckFastModelSettings) {
                     Text(

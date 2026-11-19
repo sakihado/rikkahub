@@ -1,7 +1,9 @@
 <resources>
     <string name="agent_continue">Continue from here</string>
+    <string name="agent_continue_desc">Keep completed steps and continue from where it stopped</string>
     <string name="agent_continue_short">Continue</string>
     <string name="agent_regenerate_all">Regenerate entire reply</string>
+    <string name="agent_regenerate_all_desc">Create a new branch and regenerate from scratch</string>
     <string name="agent_interrupted">Generation was interrupted. Completed steps have been kept.</string>
     <string name="agent_step_limit">Step limit reached. The task is paused.</string>
     <string name="agent_truncated">Output limit reached during a tool call. Consider increasing the output limit before continuing.</string>
