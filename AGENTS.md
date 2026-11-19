@@ -66,6 +66,33 @@ See `tools/FAST_CHECK.md` for argument semantics, reporting and limitations.
 - No fixed time or percentage-of-bugs guarantee. Test execution is often cheap; compilation,
   configuration and cache misses dominate. Run long checks in the background and report progress.
 
+### End-to-End Ship & Release Delivery Pipeline (Default for Code Changes)
+
+Unless the user explicitly asks to keep changes local or skip CI/release delivery, follow this
+complete pipeline after finishing code edits on `feat/gemini-file-api`:
+
+1. **Local verification**: Run `./tools/fast-check.sh pre-push` (add `--with-web` if `web-ui`
+   changed; also run `./tools/fast-check.sh :workspace:test` or `:speech:test` when those modules
+   changed). Wait until all checks pass.
+2. **Commit & push directly**: Review `git status`, commit the changes cleanly, and push directly
+   to `origin feat/gemini-file-api` (use `[skip ci]` only for docs-only updates that should not
+   re-trigger APK builds).
+3. **Confirm Actions run started**: Verify the new run on `sakihado/rikkahub` (not `upstream`)
+   with `gh run list -R sakihado/rikkahub -b feat/gemini-file-api -L 3` (matching `HEAD` SHA)
+   and report the Run ID and URL to the user.
+4. **Watch in background & download**: Start a background shell task (`run_in_background=true`,
+   never block in foreground or manually poll):
+   ```bash
+   python3 /workspace/watch_ci_download.py --sha "$(git rev-parse HEAD)"
+   ```
+   (or pass the confirmed `<run_id>` directly). The script waits for completion, downloads
+   `rikkahub-apks` into `/workspace/ci-artifacts/<run_id>/`, and prints `RELEASE_APK=<path>`.
+5. **Deliver unsigned Release APK**: When the background task completes with exit code `0`,
+   immediately call `workspace_export_file` with `source_path` set to the `RELEASE_APK`
+   (`app-github-arm64-v8a-release-unsigned.apk`, **no signing needed**) to export it to the
+   user's phone `Download/RikkaHub` folder. If CI fails, inspect the failed job/step logs and
+   report the cause concisely.
+
 App 有一个 `distribution` 维度的 product flavor：`github`（默认）和 `play`，共用同一个 applicationId。
 渠道差异用 `BuildConfig.IS_PLAY_STORE` 判断（如 Play 版不检查更新、不显示更新提醒）。
 

@@ -88,3 +88,13 @@ python3 -m unittest discover -s tools/tests -p 'test_fast_check.py' -v
 ```
 
 These tests use temporary Git checkouts and fake Gradle/pnpm commands. They do not compile the app, stop daemons, use API credentials or execute provider calls.
+
+## Ship & release delivery after `pre-push` passes
+
+Unless the user asks not to push or build:
+
+1. Commit verified changes and `git push origin feat/gemini-file-api`.
+2. Confirm the GitHub Actions run for `HEAD` is queued/running on `sakihado/rikkahub` (`gh run list -R sakihado/rikkahub -b feat/gemini-file-api -L 3`) and share the run link.
+3. Launch a background watcher (`run_in_background=true`):
+   `python3 /workspace/watch_ci_download.py --sha "$(git rev-parse HEAD)"` (or pass `<run_id>`).
+4. Once notified of exit code `0`, immediately export the downloaded `RELEASE_APK` (`app-github-arm64-v8a-release-unsigned.apk`, unsigned) to the phone's `Download/RikkaHub` folder via `workspace_export_file`.
