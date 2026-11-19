@@ -242,12 +242,43 @@ private fun buildWorkspacePrompt(
     appendLine(
         "- When you need to deliver a build artifact or generated file to the user's phone, write it inside `/workspace` first and call `workspace_export_file` to export it to `Download/RikkaHub` with user approval."
     )
+    val storageMounts = workspace.storageMountList()
+    val (lockedStorageMounts, writableStorageMounts) = if (hostAccess) {
+        storageMounts.partition { mount ->
+            val normalized = mount.path.trimEnd('/')
+            normalized == "/sdcard" ||
+                normalized.startsWith("/sdcard/") ||
+                normalized == "/storage/emulated/0" ||
+                normalized.startsWith("/storage/emulated/0/")
+        }
+    } else {
+        emptyList<me.rerere.rikkahub.data.model.WorkspaceStorageMount>() to storageMounts
+    }
     if (hostAccess) {
         appendLine(
-            "- Read-Only Phone Storage (`/sdcard` and `/storage/emulated/0`): Mounted strictly READ-ONLY (`EROFS`) for this conversation. You may inspect, search, or copy files from `/sdcard` into `/workspace`, but any attempt to write, modify, rename, or delete files under `/sdcard` will fail with `Read-only file system`. Use `workspace_export_file` to export artifacts to `Download/RikkaHub`."
+            "- Read-Only Phone Storage (`/sdcard` and `/storage/emulated/0`): Mounted strictly READ-ONLY (`EROFS`) for this conversation. You may inspect, search, or copy files from `/sdcard` into `/workspace`, but any attempt to write, modify, rename, or delete files under `/sdcard` or `/storage/emulated/0` will fail with `Read-only file system`. Use `workspace_export_file` to export artifacts to `Download/RikkaHub`."
         )
+        if (lockedStorageMounts.isNotEmpty()) {
+            val lockedList = lockedStorageMounts.joinToString(", ") { "`${it.path}`" }
+            appendLine(
+                "  Note: Even though this workspace also configures shared storage mounts ($lockedList), read-only host access is active in this conversation so all paths under `/sdcard` and `/storage/emulated/0` are strictly READ-ONLY right now. Do not attempt to write there directly; write into `/workspace` and call `workspace_export_file` instead."
+            )
+        }
         appendLine(
             "- Read-Only Android Host Probe (`host-sh`): Inside `workspace_shell`, run `host-sh \"<readonly_android_query>\"` to execute a single read-only Android diagnostic command (UID 2000 shell: `getprop`, `dumpsys <service>`, `pm list/path/dump`, `settings get/list`, `logcat -d`, `wm size/density`, `ps`, `df`) and pipe its stdout into Linux tools (`python3`, `jq`, `awk`, `grep`). Shell operators (`|`, `;`, `>`, `\$`) are not allowed inside the `host-sh` argument itself; always pipe and filter in the outer `workspace_shell`."
+        )
+    }
+    if (writableStorageMounts.isNotEmpty()) {
+        appendLine(
+            "- The user mounted these directories from the phone's shared storage at the same paths, so files there are the user's real files (also visible to other apps). Be careful when modifying or deleting anything there:"
+        )
+        writableStorageMounts.forEach { mount ->
+            appendLine("  - `${mount.path}`")
+        }
+        // 实测: 共享存储 (FUSE) 拒绝建软链接; PRoot 的 link2symlink 模拟硬链接时会先把原文件改名成 .l2s.*,
+        // 建软链接失败后不回滚, 原文件名就消失了
+        appendLine(
+            "  These directories are on Android shared storage, which supports neither symbolic nor hard links. Never run `ln` there: a failed hard link renames the original file to a hidden `.l2s.*` file. Tools that create links (such as git, which hard-links object files, or package managers) can break there, so run them in `/workspace` and copy the results back."
         )
     }
     if (!cwd.isNullOrBlank()) {

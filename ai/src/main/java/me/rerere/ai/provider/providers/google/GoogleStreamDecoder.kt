@@ -66,13 +66,13 @@ internal class GoogleStreamDecoder(
 
     private fun parseMessage(content: JsonObject, groundingMetadata: JsonObject?): UIMessage = UIMessage(
         role = MessageRole.ASSISTANT,
-        parts = content["parts"]?.jsonArray?.mapIndexed { index, part ->
+        parts = content["parts"]?.jsonArray?.mapIndexedNotNull { index, part ->
             parsePart(part.jsonObject, index)
         }.orEmpty(),
         annotations = parseAnnotations(groundingMetadata),
     )
 
-    private fun parsePart(part: JsonObject, index: Int): UIMessagePart = when {
+    private fun parsePart(part: JsonObject, index: Int): UIMessagePart? = when {
         part.containsKey("text") -> {
             val text = part["text"]?.jsonPrimitive?.contentOrNull ?: ""
             val thought = part["thought"]?.jsonPrimitive?.booleanOrNull == true
@@ -151,8 +151,10 @@ internal class GoogleStreamDecoder(
                 )
             }
         }
+        // Gemini 可能单独下发只含 thoughtSignature (或附带 thought) 的纯签名 part，由 GoogleStreamState 挂到相邻 part 上；
+        // 含有其他未知字段的 payload 按未知 part 直接跳过，不误降级为纯签名
         part.containsKey("thoughtSignature") &&
-                part.keys.all { it == "thoughtSignature" || it == "thought" } -> {
+            part.keys.all { it == "thoughtSignature" || it == "thought" } -> {
             val thought = part["thought"]?.jsonPrimitive?.booleanOrNull == true
             val metadata = part.toGoogleThoughtMetadata(isThought = thought.takeIf { it })
             if (thought) {
@@ -162,7 +164,9 @@ internal class GoogleStreamDecoder(
                 UIMessagePart.Text("", metadata)
             }
         }
-        else -> error("unknown message part type: $part")
+
+        // 未知 part 不中断整个流，直接跳过
+        else -> null
     }
 
     private fun parseAnnotations(metadata: JsonObject?): List<UIMessageAnnotation> =
@@ -191,7 +195,9 @@ internal class GoogleStreamDecoder(
     private class GoogleStreamState {
         private var sequence = 0
         private var textId: String? = null
+        private var textHasMetadata = false
         private var reasoningId: String? = null
+        private var reasoningHasMetadata = false
         private var imageId: String? = null
         private val openToolIds = linkedSetOf<String>()
 
@@ -200,40 +206,46 @@ internal class GoogleStreamDecoder(
             var emittedImages = 0
             message.parts.forEach { part ->
                 when (part) {
-                    is UIMessagePart.Text -> if (part.text.isNotEmpty()) {
-                        addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
-                        val signed = part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
-                        if (signed) addAll(closeText())
-                        val id = textId ?: nextId(responseId, "text").also {
-                            textId = it; add(StreamChunk.TextStart(it, part.metadata))
-                        }
-                        add(StreamChunk.TextDelta(id, part.text, part.metadata))
-                        if (signed) addAll(closeText())
-                    } else if (part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null) {
-                        // 纯签名占位 part 独立发出，不合并到前一个文本 part 上
-                        addAll(closeText()); addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
-                        val id = nextId(responseId, "text")
-                        add(StreamChunk.TextStart(id, part.metadata))
-                        add(StreamChunk.TextDelta(id, "", part.metadata))
-                        add(StreamChunk.TextEnd(id))
-                    }
-                    is UIMessagePart.Reasoning -> if (
-                        part.reasoning.isNotEmpty() || part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
-                    ) {
-                        addAll(closeText()); addAll(closeImage()); addAll(closeTools())
-                        val signed = part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
-                        if (signed) addAll(closeReasoning())
-                        val isNew = reasoningId == null
-                        val id = reasoningId ?: nextId(responseId, "reasoning").also {
-                            reasoningId = it; add(StreamChunk.ReasoningStart(it, part.metadata))
-                        }
-                        add(StreamChunk.ReasoningDelta(id, part.reasoning, part.metadata))
-                        if (signed || (isNew && part.reasoning.isEmpty() && part.finishedAt != null)) {
+                    is UIMessagePart.Text -> when {
+                        part.text.isNotEmpty() -> {
                             addAll(closeReasoning())
+                            addAll(closeImage())
+                            addAll(closeTools())
+                            val signed = part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
+                            if (signed) addAll(closeText())
+                            val id = textId ?: nextId(responseId, "text").also {
+                                textId = it
+                                add(StreamChunk.TextStart(it, part.metadata))
+                            }
+                            if (signed) textHasMetadata = true
+                            add(StreamChunk.TextDelta(id, part.text, part.metadata))
+                            if (signed) addAll(closeText())
+                        }
+
+                        else -> part.metadata
+                            ?.takeIf { part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null }
+                            ?.let { addAll(appendStandaloneMetadata(it, responseId)) }
+                    }
+                    is UIMessagePart.Reasoning -> {
+                        val signed = part.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
+                        if (part.reasoning.isNotEmpty() || signed) {
+                            addAll(closeText())
+                            addAll(closeImage())
+                            addAll(closeTools())
+                            if (signed) addAll(closeReasoning())
+                            val id = reasoningId ?: nextId(responseId, "reasoning").also {
+                                reasoningId = it
+                                add(StreamChunk.ReasoningStart(it, part.metadata))
+                            }
+                            if (signed) reasoningHasMetadata = true
+                            add(StreamChunk.ReasoningDelta(id, part.reasoning, part.metadata))
+                            if (signed) addAll(closeReasoning())
                         }
                     }
                     is UIMessagePart.Tool -> {
-                        addAll(closeText()); addAll(closeReasoning()); addAll(closeImage())
+                        addAll(closeText())
+                        addAll(closeReasoning())
+                        addAll(closeImage())
                         val id = part.toolCallId.ifBlank { nextId(responseId, "tool") }
                         if (openToolIds.add(id)) add(StreamChunk.ToolCallStart(id, part.toolName, part.metadata))
                         if (part.input.isNotEmpty()) {
@@ -241,7 +253,10 @@ internal class GoogleStreamDecoder(
                         }
                     }
                     is UIMessagePart.ServerTool -> {
-                        addAll(closeText()); addAll(closeReasoning()); addAll(closeImage()); addAll(
+                        addAll(closeText())
+                        addAll(closeReasoning())
+                        addAll(closeImage())
+                        addAll(
                             closeTools()
                         )
                         if (part.status == ServerToolStatus.IN_PROGRESS) {
@@ -266,7 +281,9 @@ internal class GoogleStreamDecoder(
                         }
                     }
                     is UIMessagePart.Image -> {
-                        addAll(closeText()); addAll(closeReasoning()); addAll(closeTools())
+                        addAll(closeText())
+                        addAll(closeReasoning())
+                        addAll(closeTools())
                         if (imageCount > 1 && emittedImages > 0) addAll(closeImage())
                         val id = imageId ?: nextId(responseId, "image").also {
                             imageId = it
@@ -286,15 +303,61 @@ internal class GoogleStreamDecoder(
         }
 
         fun finish(reason: String?, responseId: String, model: String, protocolCompleted: Boolean): List<StreamChunk> = buildList {
-            addAll(closeText()); addAll(closeReasoning()); addAll(closeImage()); addAll(closeTools())
+            addAll(closeText())
+            addAll(closeReasoning())
+            addAll(closeImage())
+            addAll(closeTools())
             add(StreamChunk.Finish(reason, responseId, model, protocolCompleted))
         }
 
-        private fun closeText() = textId?.let { textId = null; listOf(StreamChunk.TextEnd(it)) }.orEmpty()
-        private fun closeReasoning() = reasoningId?.let {
-            reasoningId = null; listOf(StreamChunk.ReasoningEnd(it))
+        /**
+         * 处理不带文本的签名 part（`{"thoughtSignature": ...}` 或 `{"text": "", "thoughtSignature": ...}`）：
+         * 优先挂到当前还没有签名的文本/思考块上；否则单独开一个空文本块保存签名，保证回放时能原样带回。
+         */
+        private fun appendStandaloneMetadata(metadata: JsonObject, responseId: String): List<StreamChunk> = buildList {
+            val currentText = textId
+            val currentReasoning = reasoningId
+            when {
+                currentText != null && !textHasMetadata -> {
+                    textHasMetadata = true
+                    add(StreamChunk.TextDelta(currentText, "", metadata.withoutSignatureOnly()))
+                }
+
+                currentReasoning != null && !reasoningHasMetadata -> {
+                    reasoningHasMetadata = true
+                    add(StreamChunk.ReasoningDelta(currentReasoning, "", metadata.withoutSignatureOnly()))
+                }
+
+                else -> {
+                    addAll(closeText())
+                    addAll(closeReasoning())
+                    addAll(closeImage())
+                    addAll(closeTools())
+                    val id = nextId(responseId, "text")
+                    textId = id
+                    textHasMetadata = true
+                    add(StreamChunk.TextStart(id, metadata))
+                }
+            }
+        }
+
+        private fun JsonObject.withoutSignatureOnly(): JsonObject =
+            if (containsKey("google_signature_only")) JsonObject(filterKeys { it != "google_signature_only" }) else this
+
+        private fun closeText() = textId?.let {
+            textId = null
+            textHasMetadata = false
+            listOf(StreamChunk.TextEnd(it))
         }.orEmpty()
-        private fun closeImage() = imageId?.let { imageId = null; listOf(StreamChunk.ImageEnd(it)) }.orEmpty()
+        private fun closeReasoning() = reasoningId?.let {
+            reasoningId = null
+            reasoningHasMetadata = false
+            listOf(StreamChunk.ReasoningEnd(it))
+        }.orEmpty()
+        private fun closeImage() = imageId?.let {
+            imageId = null
+            listOf(StreamChunk.ImageEnd(it))
+        }.orEmpty()
         private fun closeTools() = openToolIds.toList().map { StreamChunk.ToolCallEnd(it) }.also {
             openToolIds.clear()
         }
@@ -309,12 +372,10 @@ internal class GoogleStreamDecoder(
             thoughtSignature = signature,
             signatureOrigin = signatureOrigin,
             isThought = isThought,
-            signatureOnly = signature?.let {
-                when {
-                    keys.all { key -> key == "thoughtSignature" || key == "thought" } -> true
-                    containsKey("text") -> false
-                    else -> null // Typed image/function parts already retain their payload type.
-                }
+            signatureOnly = if (signature != null && keys.all { key -> key == "thoughtSignature" || key == "thought" }) {
+                true
+            } else {
+                null
             },
         ).toMetadata()
     }

@@ -10,9 +10,10 @@ class LocalWorkspaceBackend(
     private val root: String,
     private val shellCompatibilityMode: Boolean = false,
     private val hostAccess: Boolean = false,
+    /** 该工作区自己的挂载, 叠加在 [WorkspaceManager] 的全局挂载表之后 */
+    private val extraMounts: List<WorkspaceBindMount> = emptyList(),
 ) : WorkspaceBackend {
-    override val layout: WorkspaceLayout
-        get() = manager.layout(hostAccess)
+    override val layout: WorkspaceLayout = manager.layout(hostAccess = hostAccess, extraMounts = extraMounts)
 
     override fun shell(): String = manager.rootfsShell(root)
 
@@ -52,12 +53,12 @@ class LocalWorkspaceBackend(
 
     override fun absoluteFileSize(path: String): Long {
         manager.ensureWorkspace(root)
-        return manager.rootfsFileSize(root, path, hostAccess)
+        return manager.rootfsFileSize(root, path, hostAccess = hostAccess, extraMounts = extraMounts)
     }
 
     override fun exportAbsoluteFile(path: String, outputStream: OutputStream) {
         manager.ensureWorkspace(root)
-        manager.exportRootfsFile(root, path, outputStream, hostAccess)
+        manager.exportRootfsFile(root, path, outputStream, hostAccess = hostAccess, extraMounts = extraMounts)
     }
 
     // 在 Rootfs 内用 shell 写入: Rootfs 里的绝对路径软链只有 PRoot 内才能正确解析
@@ -97,7 +98,8 @@ class LocalWorkspaceBackend(
         return manager.resolveFile(root, path, area)
     }
 
-    override fun localAbsoluteFile(path: String): File = manager.resolveRootfsFile(root, path, hostAccess)
+    override fun localAbsoluteFile(path: String): File =
+        manager.resolveRootfsFile(root, path, hostAccess = hostAccess, extraMounts = extraMounts)
 
     override fun executeCommand(
         command: String,
@@ -114,12 +116,21 @@ class LocalWorkspaceBackend(
             stdin = stdin,
             shellCompatibilityMode = shellCompatibilityMode,
             hostAccess = hostAccess,
+            extraMounts = extraMounts,
         )
     }
 
     override fun startBackgroundCommand(command: String, cwd: String, id: String): WorkspaceBackgroundCommand {
         manager.ensureWorkspace(root)
-        return manager.startBackgroundCommand(root, command, cwd, id, shellCompatibilityMode, hostAccess)
+        return manager.startBackgroundCommand(
+            root = root,
+            command = command,
+            cwd = cwd,
+            id = id,
+            shellCompatibilityMode = shellCompatibilityMode,
+            hostAccess = hostAccess,
+            extraMounts = extraMounts,
+        )
     }
 
     private fun runCommand(action: String, command: String, stdin: ByteArray?): WorkspaceCommandResult {

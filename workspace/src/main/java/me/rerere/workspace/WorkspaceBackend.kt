@@ -3,7 +3,6 @@ package me.rerere.workspace
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
-import java.nio.file.Paths
 
 /**
  * 单个工作区的执行环境, 屏蔽本地 PRoot 与远程等不同实现。
@@ -74,18 +73,27 @@ data class WorkspaceLayout(
     val workspaceDir: String,
     /** AI 写入时免强制审批的目录 */
     val writableRoots: List<String>,
-    /** 环境中严格只读的挂载点列表, AI 写入/编辑工具在执行前直接硬拒绝 (不弹审批框) */
+    /** AI 写入时需要审批的挂载目录; 嵌套在 [writableRoots] 里时以更深的那一层为准 */
+    val approvalRoots: List<String> = emptyList(),
+    /** 环境中严格只读的挂载点列表, 优先级最高; 命中时 AI 写入/编辑工具在执行前直接硬拒绝 (不弹审批框) */
     val readOnlyRoots: List<String> = emptyList(),
 ) {
     /**
-     * 先做纯词法路径归一化（折叠 `.` 与 `..`），消除 `/skills/../upload/x` 等目录穿越导致的权限误判。
+     * 先做纯词法路径归一化（折叠 `.` 与 `..`），消除 `/skills/../upload/x` 等目录穿越导致的权限误判；
+     * 越过根目录（如 `/../workspace/a.txt`）时返回 null。
      */
     fun normalizeAbsolutePath(path: String): String? {
         val trimmed = path.trim()
         if (!trimmed.startsWith("/")) return null
-        return runCatching {
-            Paths.get(trimmed).normalize().toString().let { if (it.isEmpty()) "/" else it }
-        }.getOrNull()
+        val segments = ArrayDeque<String>()
+        trimmed.split('/').forEach { segment ->
+            when (segment) {
+                "", "." -> Unit
+                ".." -> segments.removeLastOrNull() ?: return null
+                else -> segments.addLast(segment)
+            }
+        }
+        return segments.joinToString(separator = "/", prefix = "/")
     }
 
     /** 存储区内的相对路径转成环境内的绝对路径 */
@@ -101,31 +109,31 @@ data class WorkspaceLayout(
     fun relativeToWorkspace(path: String): String =
         path.removePrefix("$workspaceDir/").removePrefix(workspaceDir)
 
-    /** [path] 是否落在免强制审批的可写目录内（且未命中更具体的只读子挂载） */
+    /**
+     * [path] 是否落在免强制审批的可写目录内：
+     * 1. 若命中任意严格只读挂载 [readOnlyRoots]（含其子路径），始终返回 false（与底层只读保护保持一致）；
+     * 2. 否则在 [writableRoots] 与 [approvalRoots] 间按最长匹配目录裁决。
+     */
     fun isWritable(path: String): Boolean {
         val normalized = normalizeAbsolutePath(path) ?: return false
-        val matchedWritable = writableRoots
-            .filter { normalized.matchesRootPrefix(it) }
-            .maxByOrNull { it.length }
-            ?: return false
-        val matchedReadOnly = readOnlyRoots
-            .filter { normalized.matchesRootPrefix(it) }
-            .maxByOrNull { it.length }
-        return matchedReadOnly == null || matchedWritable.length > matchedReadOnly.length
+        if (readOnlyRoots.any { normalized.matchesRootPrefix(it) }) return false
+        val writable = writableRoots.deepestMatchLength(normalized) ?: return false
+        val approval = approvalRoots.deepestMatchLength(normalized) ?: return true
+        return writable > approval
     }
 
-    /** [path] 是否落在严格只读的挂载目录内（命中时文件写入/编辑工具直接报错拒绝） */
+    /**
+     * [path] 是否落在严格只读的挂载目录内（含其子路径；优先级高于 [writableRoots] / [approvalRoots]，
+     * 命中时文件写入/编辑工具直接报错拒绝，不弹无意义的写入审批框）。
+     */
     fun isReadOnly(path: String): Boolean {
         val normalized = normalizeAbsolutePath(path) ?: return false
-        val matchedReadOnly = readOnlyRoots
-            .filter { normalized.matchesRootPrefix(it) }
-            .maxByOrNull { it.length }
-            ?: return false
-        val matchedWritable = writableRoots
-            .filter { normalized.matchesRootPrefix(it) }
-            .maxByOrNull { it.length }
-        return matchedWritable == null || matchedReadOnly.length >= matchedWritable.length
+        return readOnlyRoots.any { normalized.matchesRootPrefix(it) }
     }
+
+    private fun List<String>.deepestMatchLength(normalized: String): Int? =
+        filter { normalized.matchesRootPrefix(it) }
+            .maxOfOrNull { root -> if (root == "/") 1 else root.trimEnd('/').length }
 
     private fun String.matchesRootPrefix(root: String): Boolean {
         val cleanRoot = if (root == "/") "/" else root.trimEnd('/')

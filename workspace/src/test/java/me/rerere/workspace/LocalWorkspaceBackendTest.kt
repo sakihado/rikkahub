@@ -33,7 +33,7 @@ class LocalWorkspaceBackendTest {
     @Test
     fun layoutEnforcesWritableAndReadOnlyRootsWithNormalization() {
         val (manager, _) = createManager()
-        val layout = manager.layout
+        val layout = manager.layout()
 
         assertEquals("/workspace", layout.workspaceDir)
         assertEquals(listOf("/workspace", "/tmp", "/skills"), layout.writableRoots)

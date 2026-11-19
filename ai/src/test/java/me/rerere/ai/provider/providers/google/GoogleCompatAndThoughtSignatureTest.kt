@@ -94,20 +94,17 @@ class GoogleCompatAndThoughtSignatureTest {
         val assistant = messages.last()
         assertEquals("Hello world", assistant.toText())
         val textParts = assistant.parts.filterIsInstance<UIMessagePart.Text>()
-        assertEquals(2, textParts.size)
+        assertEquals(1, textParts.size)
         assertEquals("Hello world", textParts[0].text)
-        assertNull(textParts[0].metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
-        assertEquals("", textParts[1].text)
-        assertEquals("CAISpAM_SIG_TAIL", textParts[1].metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
-        assertEquals(origin, textParts[1].metadataAs<GoogleThoughtMetadata>()?.signatureOrigin)
+        assertEquals("CAISpAM_SIG_TAIL", textParts[0].metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
+        assertEquals(origin, textParts[0].metadataAs<GoogleThoughtMetadata>()?.signatureOrigin)
 
-        // Do not invent a text payload for an originally signature-only part.
+        // Trailing signature-only part attaches to the preceding unsigned text and replays with it.
         val body = invokeBuildRequestBody(messages, TextGenerationParams(model = toolModel()), vertexSetting)
         val modelParts = body["contents"]!!.jsonArray[1].jsonObject["parts"]!!.jsonArray
-        assertEquals(2, modelParts.size)
+        assertEquals(1, modelParts.size)
         assertEquals("Hello world", modelParts[0].jsonObject["text"]!!.jsonPrimitive.content)
-        assertFalse(modelParts[1].jsonObject.containsKey("text"))
-        assertEquals("CAISpAM_SIG_TAIL", modelParts[1].jsonObject["thoughtSignature"]!!.jsonPrimitive.content)
+        assertEquals("CAISpAM_SIG_TAIL", modelParts[0].jsonObject["thoughtSignature"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -126,13 +123,15 @@ class GoogleCompatAndThoughtSignatureTest {
 
         @Suppress("UNCHECKED_CAST")
         val parts = method.invoke(provider, rawParts, "vertex:proj:us-central1") as List<UIMessagePart>
-        assertEquals(3, parts.size)
+        assertEquals(2, parts.size)
         val reasoning = parts[0] as UIMessagePart.Reasoning
         assertEquals("", reasoning.reasoning)
         assertEquals("THOUGHT_ONLY_SIG", reasoning.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
-        val tail = parts[2] as UIMessagePart.Text
-        assertEquals("", tail.text)
-        assertEquals("TEXT_TAIL_SIG", tail.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
+        assertEquals("vertex:proj:us-central1", reasoning.metadataAs<GoogleThoughtMetadata>()?.signatureOrigin)
+        val answer = parts[1] as UIMessagePart.Text
+        assertEquals("Answer", answer.text)
+        assertEquals("TEXT_TAIL_SIG", answer.metadataAs<GoogleThoughtMetadata>()?.thoughtSignature)
+        assertEquals("vertex:proj:us-central1", answer.metadataAs<GoogleThoughtMetadata>()?.signatureOrigin)
     }
 
     @Test

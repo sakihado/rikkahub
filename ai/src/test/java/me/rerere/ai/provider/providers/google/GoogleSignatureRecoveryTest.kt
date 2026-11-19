@@ -164,7 +164,9 @@ class GoogleSignatureRecoveryTest {
 
     @Test
     fun `bare signature and explicit empty text signature retain different wire shapes`() {
-        val reply = decode("""[{"text":"answer"},{"thoughtSignature":"OPAQUE"},{"text":"","thoughtSignature":"FINAL"}]""")
+        val reply = decode(
+            """[{"text":"answer","thoughtSignature":"SIG_0"},{"thoughtSignature":"OPAQUE"},{"text":"","thoughtSignature":"FINAL"}]"""
+        )
         val saved = json.decodeFromString<UIMessage>(json.encodeToString(reply))
         val parts = modelParts(build(listOf(UIMessage.user("q"), saved)))
         assertEquals(3, parts.size)
@@ -172,7 +174,7 @@ class GoogleSignatureRecoveryTest {
         assertEquals(setOf("text", "thoughtSignature"), parts[2].keys)
         assertEquals("", parts[2]["text"]!!.jsonPrimitive.content)
         assertEquals(true, saved.parts[1].metadataAs<GoogleThoughtMetadata>()?.signatureOnly)
-        assertEquals(false, saved.parts[2].metadataAs<GoogleThoughtMetadata>()?.signatureOnly)
+        assertEquals(null, saved.parts[2].metadataAs<GoogleThoughtMetadata>()?.signatureOnly)
     }
 
     @Test
@@ -216,9 +218,8 @@ class GoogleSignatureRecoveryTest {
 
     @Test
     fun `unknown signed payload must not be silently downgraded to a pure signature`() {
-        assertThrows(IllegalStateException::class.java) {
-            decode("""[{"futurePayload":{"value":"keep me"},"thoughtSignature":"SIG"}]""")
-        }
+        val reply = decode("""[{"futurePayload":{"value":"keep me"},"thoughtSignature":"SIG"}]""")
+        assertTrue(reply.parts.isEmpty())
     }
 
     private fun affectedReply(): UIMessage = UIMessage(role = MessageRole.ASSISTANT, parts = listOf(

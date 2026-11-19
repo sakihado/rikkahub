@@ -63,6 +63,7 @@ import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.configureSessionHeaders
 import me.rerere.ai.util.encodeBase64
 import me.rerere.ai.util.json
+import me.rerere.ai.util.logRequestBody
 import me.rerere.ai.util.mergeCustomBody
 import me.rerere.ai.util.mergeCustomHeaders
 import me.rerere.ai.util.removeElements
@@ -108,7 +109,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     private val fileManager = GoogleFileManager(client = client, keyRoulette = keyRoulette)
     private val interactionsAPI = InteractionsAPI(
         client = client,
-        keyRoulette = keyRoulette,
+        authorize = ::transformRequest,
         fileManager = fileManager,
     )
 
@@ -117,8 +118,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             keyRoulette.next(providerSetting.apiKey, providerSetting.id.toString())
         }
 
-    // Interactions API 目前只有 Gemini Developer API 提供，Vertex AI 仍走 generateContent
-    private fun ProviderSetting.Google.usesInteractionsApi() = useInteractionsApi && !vertexAI
+    // Vertex AI 只有服务账号走 Interactions，且区域须为 global/us/eu，否则仍走 generateContent
+    private fun ProviderSetting.Google.usesInteractionsApi() = useInteractionsApi &&
+        (!vertexAI || (useServiceAccount && location in VERTEX_INTERACTIONS_LOCATIONS))
 
     private fun buildUrl(providerSetting: ProviderSetting.Google, path: String): HttpUrl {
         return if (!providerSetting.vertexAI) {
@@ -313,7 +315,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 .build()
         )
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        logRequestBody(TAG, "streamText") { json.encodeToString(requestBody) }
 
         val responseId = Uuid.random().toString()
         val decoder = GoogleStreamDecoder(
@@ -650,9 +652,28 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         return chunks
     }
 
+    // 保留无 signatureOrigin 的重载供既有单测反射调用
+    private fun parseMessageParts(parts: JsonArray?): List<UIMessagePart> =
+        parseMessageParts(parts, signatureOrigin = null)
+
     private fun parseMessageParts(parts: JsonArray?, signatureOrigin: String? = null): List<UIMessagePart> = buildList {
         parts.orEmpty().forEachIndexed { index, element ->
-            val part = parseMessagePart(element.jsonObject, index, signatureOrigin)
+            val part = parseMessagePart(element.jsonObject, index, signatureOrigin) ?: return@forEachIndexed
+            if (part is UIMessagePart.Text && part.text.isEmpty() && part.hasGoogleThoughtSignature()) {
+                // 不带文本的签名 part：挂到前一个还没有签名的文本/思考 part 上，否则单独保留
+                val previous = lastOrNull()
+                val attachedMeta = part.metadata?.withoutSignatureOnly()
+                when {
+                    previous is UIMessagePart.Text && !previous.hasGoogleThoughtSignature() ->
+                        set(lastIndex, previous.copy(metadata = mergeGoogleMetadata(previous.metadata, attachedMeta)))
+
+                    previous is UIMessagePart.Reasoning && !previous.hasGoogleThoughtSignature() ->
+                        set(lastIndex, previous.copy(metadata = mergeGoogleMetadata(previous.metadata, attachedMeta)))
+
+                    else -> add(part)
+                }
+                return@forEachIndexed
+            }
             if (part !is UIMessagePart.ServerTool) {
                 add(part)
                 return@forEachIndexed
@@ -682,7 +703,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         jsonObject: JsonObject,
         index: Int,
         signatureOrigin: String? = null,
-    ): UIMessagePart {
+    ): UIMessagePart? {
         return when {
             jsonObject.containsKey("text") -> {
                 val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -779,6 +800,8 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 )
             }
 
+            // Gemini 可能单独下发只含 thoughtSignature (或附带 thought) 的纯签名 part；
+            // 含有其他未知字段的 payload 一律按未知 part 跳过，不误降级为纯签名
             jsonObject.containsKey("thoughtSignature") &&
                 jsonObject.keys.all { it == "thoughtSignature" || it == "thought" } -> {
                 val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
@@ -802,7 +825,8 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 }
             }
 
-            else -> error("unknown message part type: $jsonObject")
+            // 未知 part 直接跳过，避免整次请求失败
+            else -> null
         }
     }
 
@@ -1144,15 +1168,19 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             thoughtSignature = signature,
             signatureOrigin = signatureOrigin,
             isThought = isThought,
-            signatureOnly = signature?.let {
-                when {
-                    keys.all { key -> key == "thoughtSignature" || key == "thought" } -> true
-                    containsKey("text") -> false
-                    else -> null // Typed image/function parts already retain their payload type.
-                }
+            signatureOnly = if (signature != null && keys.all { key -> key == "thoughtSignature" || key == "thought" }) {
+                true
+            } else {
+                null
             },
         ).toMetadata()
     }
+
+    private fun UIMessagePart.hasGoogleThoughtSignature(): Boolean =
+        metadataAs<GoogleThoughtMetadata>()?.thoughtSignature != null
+
+    private fun JsonObject.withoutSignatureOnly(): JsonObject =
+        if (containsKey("google_signature_only")) JsonObject(filterKeys { it != "google_signature_only" }) else this
 
     private fun enhanceGoogleErrorMessage(message: String): String {
         return if (message.contains("include_server_side_tool_invocations", ignoreCase = true)) {
