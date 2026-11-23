@@ -12,6 +12,7 @@ import me.rerere.rikkahub.hostshell.HostShellExecutor
 import me.rerere.rikkahub.hostshell.ShellApprovalStore
 import me.rerere.rikkahub.phoneuse.PhoneUseManager
 import me.rerere.rikkahub.phoneuse.isFloatingChatWindowOn
+import me.rerere.rikkahub.phoneuse.isPhoneUseCheckedInSystem
 import me.rerere.tts.provider.TTSManager
 import java.io.File
 import kotlin.uuid.Uuid
@@ -57,6 +58,7 @@ class LocalTools(
             ensureControllerReady = {
                 hostPrivilegeManager.ensurePrivilegedAccess(interactive = true)
             },
+            isCheckedInSystem = { isPhoneUseCheckedInSystem(context) },
             saveScreenshot = { bytes ->
                 filesManager.createChatFilesByByteArrays(
                     byteArrays = listOf(bytes),
